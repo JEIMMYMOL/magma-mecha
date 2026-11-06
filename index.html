@@ -173,19 +173,30 @@ const MESES_L = ["enero","febrero","marzo","abril","mayo","junio","julio","agost
 const fmtD = s => { const d = parseD(s); return d ? `${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()}` : "—"; };
 const DIAS = ["dom","lun","mar","mié","jue","vie","sáb"];
 
-const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9 };
+const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50 };
 const S = { tab:"pedidos", filtro:"activos", soloEntregados:false, pedidos:[], moldes:[], fichas:[], cfg:{...DEFAULT_CFG}, loaded:{p:false,m:false,f:false,c:false}, db:null, offline:false, calc:{lines:[], inicio:ymd(today())} };
 
 // ---------- cálculos ----------
 function fichaCalc(f){
-  const insumos = (f.insumos||[]).reduce((a,i)=> a + insCost(i), 0);
+  const desgaste = moldeCost(f);
+  const insumos = (f.insumos||[]).reduce((a,i)=> a + insCost(i), 0) + desgaste;
   const mo = N(f.manoObra);
   const base = insumos + mo;
   const sugerido = Math.ceil(base * (1 + N(f.gananciaPct)/100) / 500) * 500;
   const precio = N(f.precioFijo) > 0 ? N(f.precioFijo) : sugerido;
-  return { insumos, mo, base, sugerido, precio, ganancia: precio - base };
+  return { insumos, desgaste, mo, base, sugerido, precio, ganancia: precio - base };
 }
-function insCost(i){ const q = N(i.compraCant); return q > 0 ? N(i.compraPrecio) / q * N(i.uso) : 0; }
+const ENVASES_ESENCIA = [25,120,150,250,500,1000];
+const FRASCOS_COLORANTE = [10,30,60];
+function insTipo(i){ return i.tipo || (/esencia|fragancia|aroma/i.test(i.nombre||"") ? "esencia" : /colorante/i.test(i.nombre||"") ? "colorante" : "general"); }
+function insRinde(i){
+  const t = insTipo(i), q = N(i.compraCant);
+  if(t === "esencia") return q * Math.max(0.1, N(S.cfg.densEsencia) || 0.95);
+  if(t === "colorante") return q * Math.max(1, N(S.cfg.gotasMl) || 20);
+  return q;
+}
+function insCost(i){ const r = insRinde(i); return r > 0 ? N(i.compraPrecio) / r * N(i.uso) : 0; }
+function moldeCost(f){ const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId); return mo && N(mo.precio) > 0 ? N(mo.precio) / Math.max(1, N(S.cfg.usosMolde) || 50) : 0; }
 function pedidoCalc(p){
   let ventas=0, insumos=0, mo=0, velas=0;
   (p.items||[]).forEach(it => { const c = N(it.cant); velas += c; ventas += c*N(it.precio); insumos += c*N(it.costo); mo += c*N(it.mo); });
@@ -354,7 +365,18 @@ function rCosteo(m){
   <button class="btn primary" id="nuevaF">+ Nueva ficha</button></div>
   <div class="panel">${S.fichas.length ? `<div class="tbl-wrap"><table><thead><tr><th>Vela</th><th class="r">Insumos</th><th class="r">Mano de obra</th><th class="r">Ganancia</th><th class="r">Precio</th></tr></thead><tbody>
   ${S.fichas.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(f=>{ const c=fichaCalc(f); return `<tr class="click" data-fid="${esc(f.id)}"><td><b>${esc(f.nombre)}</b>${f.moldeId?`<div class="hint">${esc(S.moldes.find(x=>x.id===f.moldeId)?.nombre||"")}</div>`:""}</td><td class="r num">${$$(c.insumos)}</td><td class="r num">${$$(c.mo)}</td><td class="r num" style="color:${c.ganancia<0?"var(--bad)":"inherit"}">${$$(c.ganancia)}</td><td class="r num"><b>${$$(c.precio)}</b></td></tr>`}).join("")}
-  </tbody></table></div>` : `<div class="empty"><strong>Aún no hay fichas</strong>Crea una ficha por diseño de vela con sus insumos (cera, esencia, colorante, mica, pabilo, pegatina, bolsa).</div>`}</div>`;
+  </tbody></table></div>` : `<div class="empty"><strong>Aún no hay fichas</strong>Crea una ficha por diseño de vela con sus insumos (cera, esencia, colorante, mica, pabilo, pegatina, bolsa).</div>`}</div>
+  <div class="panel" style="margin-top:14px"><h3>Conversiones</h3>
+  <p class="hint" style="margin:0 0 12px">La esencia se compra en mililitros pero se pesa en gramos, y el colorante se compra por frasco pero se usa por gotas. Con estos valores hago la conversión. Si pesas 10 ml de tu esencia en la gramera y te da 9,5 g, la densidad es 0,95.</p>
+  <div class="grid">
+    <label for="cvD">Densidad de la esencia (g por ml)<input id="cvD" type="number" step="0.01" min="0.5" max="1.5" value="${N(S.cfg.densEsencia)}"></label>
+    <label for="cvG">Gotas de colorante por ml<input id="cvG" type="number" step="1" min="1" value="${N(S.cfg.gotasMl)}"></label>
+    <label for="cvU">Usos de cada molde<input id="cvU" type="number" step="1" min="1" value="${N(S.cfg.usosMolde)}"></label>
+  </div></div>`;
+  ["cvD","cvG","cvU"].forEach(id => $("#"+id).onchange = async () => {
+    await saveDoc("config","ajustes",{...S.cfg, densEsencia:N($("#cvD").value)||0.95, gotasMl:Math.round(N($("#cvG").value))||20, usosMolde:Math.round(N($("#cvU").value))||50}, true);
+    render(); toast("Conversión actualizada");
+  });
   $("#nuevaF").onclick = () => editFicha(null);
   m.querySelectorAll("[data-fid]").forEach(r => r.onclick = () => editFicha(S.fichas.find(x=>x.id===r.dataset.fid)));
 }
@@ -488,7 +510,9 @@ function editMolde(m0){
     <label for="mN">Nombre del molde<input id="mN" value="${esc(mo.nombre)}" placeholder="Ej. Calabaza mediana"></label>
     <div class="grid"><label for="mD">Diámetro más ancho (cm)<input id="mD" type="number" step="0.1" min="0" value="${esc(mo.diametro)}"></label>
     <label for="mC">Unidades que tienes<input id="mC" type="number" min="1" value="${N(mo.cantidad)||1}"></label>
-    <label for="mG">Cera por vela (g)<input id="mG" type="number" min="0" value="${esc(mo.gramos)}"></label></div>
+    <label for="mG">Cera por vela (g)<input id="mG" type="number" min="0" value="${esc(mo.gramos)}"></label>
+    <label for="mPr">Precio del molde ($)<input id="mPr" type="number" min="0" step="1000" value="${N(mo.precio)||""}"></label></div>
+    <p class="hint" id="mDes" style="margin:0"></p>
     <div class="panel row" id="mSug" style="justify-content:space-between"></div>
     <label for="mP">Pabilo probado (opcional)<select id="mP"><option value="">Usar el sugerido</option>${["S","M","L","2×L","2×M"].map(t=>`<option ${mo.pabiloFijo===t?"selected":""}>${t}</option>`).join("")}</select></label>
     <label for="mNo">Notas de quemado<textarea id="mNo" rows="2" placeholder="Ej. con L hizo túnel; con M quemó parejo">${esc(mo.notas)}</textarea></label>
@@ -496,8 +520,10 @@ function editMolde(m0){
   (d, close) => {
     const sug = () => { const t = pabilo($("#mD",d).value); $("#mSug",d).innerHTML = `<span>Pabilo sugerido para ${N($("#mD",d).value)||"—"} cm</span><span class="wick">${t}</span>`; };
     $("#mD",d).oninput = sug; sug();
+    const des = () => { const p = N($("#mPr",d).value), u = Math.max(1, N(S.cfg.usosMolde)||50); $("#mDes",d).textContent = p ? `Desgaste por vela: ${$$(p/u)} (precio ÷ ${u} usos). Se suma solo en las fichas que usan este molde.` : "Con el precio del molde calculo cuánto se desgasta en cada vela."; };
+    $("#mPr",d).oninput = des; des();
     $("#mSave",d).onclick = async () => {
-      const body = { nombre:$("#mN",d).value.trim(), diametro:N($("#mD",d).value), cantidad:Math.max(1,Math.round(N($("#mC",d).value))), gramos:N($("#mG",d).value), pabiloFijo:$("#mP",d).value, notas:$("#mNo",d).value };
+      const body = { nombre:$("#mN",d).value.trim(), diametro:N($("#mD",d).value), cantidad:Math.max(1,Math.round(N($("#mC",d).value))), gramos:N($("#mG",d).value), precio:N($("#mPr",d).value), pabiloFijo:$("#mP",d).value, notas:$("#mNo",d).value };
       if(!body.nombre){ $("#mN",d).focus(); toast("Ponle nombre al molde"); return; }
       if(await saveDoc("moldes", mo.id, body)){ close(); toast("Molde guardado"); }
     };
@@ -509,16 +535,22 @@ function editFicha(f0){
   const isNew = !f0;
   const f = JSON.parse(JSON.stringify(f0 || { id:uid(), nombre:"", moldeId:"", insumos:[
     {nombre:"Cera de soya", compraCant:1000, compraPrecio:0, uso:0, unidad:"g"},
-    {nombre:"Esencia", compraCant:120, compraPrecio:0, uso:0, unidad:"ml"},
-    {nombre:"Colorante", compraCant:1, compraPrecio:0, uso:0, unidad:"und"},
+    {nombre:"Esencia", tipo:"esencia", compraCant:120, compraPrecio:0, uso:0, unidad:"g"},
+    {nombre:"Colorante", tipo:"colorante", compraCant:10, compraPrecio:0, uso:0, unidad:"gotas"},
     {nombre:"Pabilo", compraCant:1, compraPrecio:0, uso:1, unidad:"und"},
     {nombre:"Pegatina", compraCant:1, compraPrecio:0, uso:1, unidad:"und"},
     {nombre:"Bolsa", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}], manoObra:0, gananciaPct:30, precioFijo:0 }));
+  f.insumos.forEach(i => {
+    const t = insTipo(i); i.tipo = t;
+    if(t === "esencia"){ if(!ENVASES_ESENCIA.includes(N(i.compraCant))) i.compraCant = 120; i.unidad = "g"; }
+    if(t === "colorante"){ if(!FRASCOS_COLORANTE.includes(N(i.compraCant))) i.compraCant = 10; i.unidad = "gotas"; }
+  });
   drawer(isNew ? "Nueva ficha" : "Ficha de costeo", `
     <div class="grid"><label for="fN">Vela<input id="fN" value="${esc(f.nombre)}" placeholder="Ej. Calabaza Halloween"></label>
     <label for="fM">Molde<select id="fM"><option value="">— Sin molde —</option>${S.moldes.map(m=>`<option value="${esc(m.id)}" ${m.id===f.moldeId?"selected":""}>${esc(m.nombre)}</option>`).join("")}</select></label></div>
-    <div><h3>Insumos por vela</h3><p class="hint" style="margin:0 0 8px">Pon cuánto trae lo que compras, cuánto pagaste y cuánto gasta una vela. Ej. cera: compré 1000 g por $25.000, uso 180 g.</p>
-    <div class="lines" id="fIns"></div><button class="btn small" id="fAdd" style="margin-top:8px">+ Agregar insumo</button></div>
+    <div><h3>Insumos por vela</h3><p class="hint" style="margin:0 0 8px">Pon cuánto trae lo que compras, cuánto pagaste y cuánto gasta una vela. Ej. cera: compré 1000 g por $25.000, uso 180 g. La esencia la eliges por envase y la pones en gramos; el colorante, por frasco y en gotas.</p>
+    <div class="lines" id="fIns"></div><div class="line" id="fMol" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:8px"><button class="btn small" id="fAdd">+ Agregar insumo</button><button class="btn small" id="fAddE">+ Esencia</button><button class="btn small" id="fAddC">+ Colorante</button></div></div>
     <div class="grid"><label for="fMO">Tu mano de obra por vela<input id="fMO" type="number" min="0" step="100" value="${N(f.manoObra)}"></label>
     <label for="fG">Ganancia empresa (%)<input id="fG" type="number" min="0" step="1" value="${N(f.gananciaPct)}"></label>
     <label for="fP">Precio fijo (opcional)<input id="fP" type="number" min="0" step="500" value="${N(f.precioFijo)||""}" placeholder="Usar el sugerido"></label></div>
@@ -526,28 +558,48 @@ function editFicha(f0){
     <div class="row" style="justify-content:space-between"><button class="btn danger" id="fDel" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="fSave">Guardar ficha</button></div>`,
   (d, close) => {
     const draw = () => {
-      $("#fIns",d).innerHTML = f.insumos.map((i,k)=>`<div class="line ins">
+      const rindeTxt = i => { const t = insTipo(i), r = insRinde(i); return t === "esencia" ? `El envase rinde unos ${Math.round(r)} g` : t === "colorante" ? `El frasco rinde unas ${Math.round(r)} gotas` : ""; };
+      $("#fIns",d).innerHTML = f.insumos.map((i,k)=>{ const t = insTipo(i);
+        const compra = t === "esencia" ? `<label for="q${k}">Envase<select id="q${k}" data-k="${k}" data-f="compraCant">${ENVASES_ESENCIA.map(v=>`<option value="${v}" ${N(i.compraCant)===v?"selected":""}>${v===1000?"1 litro":v+" ml"}</option>`).join("")}</select></label>`
+          : t === "colorante" ? `<label for="q${k}">Frasco<select id="q${k}" data-k="${k}" data-f="compraCant">${FRASCOS_COLORANTE.map(v=>`<option value="${v}" ${N(i.compraCant)===v?"selected":""}>${v} ml</option>`).join("")}</select></label>`
+          : `<label for="q${k}">Compré<input id="q${k}" type="number" min="0" data-k="${k}" data-f="compraCant" value="${N(i.compraCant)}"></label>`;
+        const uLbl = t === "esencia" ? "Uso (g)" : t === "colorante" ? "Uso (gotas)" : `Uso (${esc(i.unidad||"und")})`;
+        return `<div class="line ins">
         <label class="ins-name" for="n${k}">Insumo<input id="n${k}" data-k="${k}" data-f="nombre" value="${esc(i.nombre)}"></label>
-        <label for="q${k}">Compré<input id="q${k}" type="number" min="0" data-k="${k}" data-f="compraCant" value="${N(i.compraCant)}"></label>
+        ${compra}
         <label for="p${k}">Pagué $<input id="p${k}" type="number" min="0" step="100" data-k="${k}" data-f="compraPrecio" value="${N(i.compraPrecio)}"></label>
-        <label for="u${k}">Uso (${esc(i.unidad||"und")})<input id="u${k}" type="number" min="0" step="any" data-k="${k}" data-f="uso" value="${N(i.uso)}"></label>
+        <label for="u${k}">${uLbl}<input id="u${k}" type="number" min="0" step="any" data-k="${k}" data-f="uso" value="${N(i.uso)}"></label>
         <div class="cost" id="c${k}">${$$(insCost(i))}</div>
-        <button class="x" data-dk="${k}" aria-label="Quitar insumo">×</button></div>`).join("");
-      $("#fIns",d).querySelectorAll("[data-f]").forEach(el => el.oninput = () => { const i = f.insumos[+el.dataset.k]; i[el.dataset.f] = el.dataset.f==="nombre" ? el.value : N(el.value); $("#c"+el.dataset.k,d).textContent = $$(insCost(i)); sum(); });
+        <button class="x" data-dk="${k}" aria-label="Quitar insumo">×</button>
+        ${t !== "general" ? `<p class="hint" id="r${k}" style="grid-column:1/-1;margin:0">${rindeTxt(i)}</p>` : ""}</div>`; }).join("");
+      $("#fIns",d).querySelectorAll("[data-f]").forEach(el => el.oninput = el.onchange = () => { const i = f.insumos[+el.dataset.k]; i[el.dataset.f] = el.dataset.f==="nombre" ? el.value : N(el.value); $("#c"+el.dataset.k,d).textContent = $$(insCost(i)); const r = $("#r"+el.dataset.k,d); if(r) r.textContent = rindeTxt(i); sum(); });
+      drawMolde();
       $("#fIns",d).querySelectorAll("[data-dk]").forEach(b => b.onclick = () => { f.insumos.splice(+b.dataset.dk,1); draw(); });
       sum();
+    };
+    const drawMolde = () => {
+      const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId), u = Math.max(1, N(S.cfg.usosMolde)||50), el = $("#fMol",d);
+      el.hidden = !mo;
+      if(!mo) return;
+      el.style.gridTemplateColumns = "1fr auto";
+      el.innerHTML = N(mo.precio) > 0
+        ? `<div><b>Desgaste del molde</b><div class="hint">${esc(mo.nombre)}: ${$$(mo.precio)} ÷ ${u} usos</div></div><div class="cost">${$$(N(mo.precio)/u)}</div>`
+        : `<div><b>Desgaste del molde</b><div class="hint">Pon el precio de «${esc(mo.nombre)}» en Moldes y pabilo para sumarlo aquí.</div></div><div class="cost">${$$(0)}</div>`;
     };
     const sum = () => {
       f.manoObra = N($("#fMO",d).value); f.gananciaPct = N($("#fG",d).value); f.precioFijo = N($("#fP",d).value);
       const c = fichaCalc(f);
-      $("#fSum",d).innerHTML = `<dl class="kv"><dt>Insumos</dt><dd class="num">${$$(c.insumos)}</dd><dt>Mano de obra</dt><dd class="num">${$$(c.mo)}</dd>
+      $("#fSum",d).innerHTML = `<dl class="kv"><dt>Insumos${c.desgaste?" + molde":""}</dt><dd class="num">${$$(c.insumos)}</dd><dt>Mano de obra</dt><dd class="num">${$$(c.mo)}</dd>
       <dt>Costo total</dt><dd class="num">${$$(c.base)}</dd><dt>Precio sugerido (redondeado a $500)</dt><dd class="num">${$$(c.sugerido)}</dd>
       <dt class="total">Precio de venta</dt><dd class="total num">${$$(c.precio)}</dd>
       <dt>Ganancia empresa por vela</dt><dd class="num" style="color:${c.ganancia<0?"var(--bad)":"var(--ok)"}">${$$(c.ganancia)}${c.precio>0?` (${Math.round(c.ganancia/c.precio*100)}% del precio)`:""}</dd></dl>
       ${c.ganancia<0?`<p class="hint" style="color:var(--bad);margin:8px 0 0">Con ese precio fijo pierdes plata en cada vela.</p>`:""}`;
     };
     ["fMO","fG","fP"].forEach(id => $("#"+id,d).oninput = sum);
-    $("#fAdd",d).onclick = () => { f.insumos.push({nombre:"", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}); draw(); };
+    $("#fAdd",d).onclick = () => { f.insumos.push({nombre:"", tipo:"general", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}); draw(); };
+    $("#fAddE",d).onclick = () => { f.insumos.push({nombre:"Esencia", tipo:"esencia", compraCant:120, compraPrecio:0, uso:0, unidad:"g"}); draw(); };
+    $("#fAddC",d).onclick = () => { f.insumos.push({nombre:"Colorante", tipo:"colorante", compraCant:10, compraPrecio:0, uso:0, unidad:"gotas"}); draw(); };
+    $("#fM",d).onchange = () => { f.moldeId = $("#fM",d).value; drawMolde(); sum(); };
     $("#fSave",d).onclick = async () => {
       f.nombre = $("#fN",d).value.trim(); f.moldeId = $("#fM",d).value;
       if(!f.nombre){ $("#fN",d).focus(); toast("Ponle nombre a la vela"); return; }
