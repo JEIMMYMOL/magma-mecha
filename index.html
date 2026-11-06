@@ -707,10 +707,10 @@ async function conectar(u){
     }
     // 2. escucha los cambios de la nube
     SYNC.unsubs.forEach(f => f()); SYNC.unsubs = [];
-    COLS.forEach(col => SYNC.unsubs.push(userCol(col).onSnapshot(snap => {
+    COLS.forEach(col => SYNC.unsubs.push(userCol(col).onSnapshot({ includeMetadataChanges:true }, snap => {
       const o = {}; snap.docs.forEach(d => o[d.id] = d.data());
       store[col] = o; persist(); syncState();
-      SYNC.estado = snap.metadata.fromCache ? "sin-red" : "ok"; paintSync();
+      SYNC.estado = (snap.metadata.fromCache && !navigator.onLine) ? "sin-red" : snap.metadata.hasPendingWrites ? "subiendo" : "ok"; paintSync();
       const typing = document.activeElement && document.activeElement.closest("#main") && document.activeElement.matches("input,select,textarea");
       if(!$("#ov") && !typing) render();
     }, e => { SYNC.estado = "error"; SYNC.error = "La nube rechazó la conexión. Revisa las reglas de Firestore."; paintSync(); })));
@@ -739,7 +739,7 @@ async function reemplazarNube(){
 }
 function paintSync(){
   const b = $("#btnSync"); if(!b) return;
-  const txt = { local:"Sincronizar", subiendo:"Conectando…", ok:"✓ Sincronizado", "sin-red":"Sin red · guarda aquí", error:"⚠ Sincronizar", "sin-sdk":"Sincronizar" }[SYNC.estado] || "Sincronizar";
+  const txt = { local:"Sincronizar", subiendo:"Subiendo…", ok:"✓ Sincronizado", "sin-red":"Sin red · guarda aquí", error:"⚠ Sincronizar", "sin-sdk":"Sincronizar" }[SYNC.estado] || "Sincronizar";
   b.textContent = txt;
   b.style.color = SYNC.estado === "ok" ? "var(--ok)" : SYNC.estado === "error" ? "var(--bad)" : "";
 }
