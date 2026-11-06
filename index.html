@@ -177,7 +177,7 @@ const MESES_L = ["enero","febrero","marzo","abril","mayo","junio","julio","agost
 const fmtD = s => { const d = parseD(s); return d ? `${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()}` : "—"; };
 const DIAS = ["dom","lun","mar","mié","jue","vie","sáb"];
 
-const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50, pabPrecioS:1200, pabPrecioM:1500, pabPrecioL:1800, domicilioCosto:21000 };
+const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50, pabPrecioS:1200, pabPrecioM:1500, pabPrecioL:1800, domicilioCosto:21000, descDesde:12, descPct:5 };
 const S = { tab:"pedidos", filtro:"activos", soloEntregados:false, pedidos:[], moldes:[], fichas:[], combos:[], precios:[], cfg:{...DEFAULT_CFG}, loaded:{p:false,m:false,f:false,c:false}, db:null, offline:false, calc:{lines:[], inicio:ymd(today())} };
 
 // ---------- cálculos ----------
@@ -255,14 +255,18 @@ function comboCalc(c){
 }
 function moldeCost(f){ const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId); return mo && N(mo.precio) > 0 ? N(mo.precio) / Math.max(1, N(S.cfg.usosMolde) || 50) : 0; }
 function pedidoCalc(p){
-  let ventas=0, insumos=0, mo=0, velas=0;
-  (p.items||[]).forEach(it => { const c = N(it.cant); velas += c*(N(it.velas)||1); ventas += c*N(it.precio); insumos += c*N(it.costo); mo += c*N(it.mo); });
+  let ventas=0, insumos=0, mo=0, velas=0, sueltas=0;
+  (p.items||[]).forEach(it => { const c = N(it.cant); velas += c*(N(it.velas)||1); ventas += c*N(it.precio); insumos += c*N(it.costo); mo += c*N(it.mo); if(!it.comboId) sueltas += c*N(it.precio); });
+  const descAplica = velas > N(S.cfg.descDesde) && N(S.cfg.descPct) > 0;
+  const descOn = descAplica && (p.descAplicar !== undefined ? !!p.descAplicar : (!p.creado || p.creado >= "2026-11-06T23:30"));
+  const descuento = descOn ? Math.round(sueltas * N(S.cfg.descPct) / 100) : 0;
+  ventas -= descuento;
   const envio = N(p.envio);
   const envioCosto = p.envioCosto === undefined || p.envioCosto === null || p.envioCosto === "" ? envio : N(p.envioCosto);
   const envioAsumido = Math.max(0, envioCosto - envio);
   const total = ventas + envio;
   const pagado = (p.abonos||[]).reduce((a,b)=>a+N(b.monto),0);
-  return { velas, ventas, envio, envioCosto, envioAsumido, total, insumos, mo, ganancia: ventas - insumos - mo - envioAsumido, pagado, saldo: Math.max(0, total - pagado) };
+  return { velas, descAplica, descOn, descuento, ventas, envio, envioCosto, envioAsumido, total, insumos, mo, ganancia: ventas - insumos - mo - envioAsumido, pagado, saldo: Math.max(0, total - pagado) };
 }
 function pabilo(diam){
   const d = N(diam), c = S.cfg;
@@ -446,10 +450,15 @@ function rCosteo(m){
     <label for="cvPM">Tamaño M<input id="cvPM" type="number" step="100" min="0" value="${N(S.cfg.pabPrecioM)}"></label>
     <label for="cvPL">Tamaño L<input id="cvPL" type="number" step="100" min="0" value="${N(S.cfg.pabPrecioL)}"></label>
     <label for="cvDom">Domicilio usual ($)<input id="cvDom" type="number" step="500" min="0" value="${N(S.cfg.domicilioCosto)}"></label>
-  </div></div>`;
-  ["cvD","cvG","cvU","cvPS","cvPM","cvPL","cvDom"].forEach(id => $("#"+id).onchange = async () => {
+  </div>
+  <h3 style="margin:16px 0 8px">Descuento por cantidad</h3>
+  <div class="grid">
+    <label for="cvDD">Cuando el pedido tiene más de (velas)<input id="cvDD" type="number" step="1" min="0" value="${N(S.cfg.descDesde)}"></label>
+    <label for="cvDP">Descuento (%)<input id="cvDP" type="number" step="1" min="0" max="90" value="${N(S.cfg.descPct)}"></label>
+  </div><p class="hint" style="margin:8px 0 0">Se aplica solo a las velas sueltas, no a los combos. En cada pedido lo puedes quitar si no corresponde.</p></div>`;
+  ["cvD","cvG","cvU","cvPS","cvPM","cvPL","cvDom","cvDD","cvDP"].forEach(id => $("#"+id).onchange = async () => {
     await saveDoc("config","ajustes",{...S.cfg, densEsencia:N($("#cvD").value)||0.95, gotasMl:Math.round(N($("#cvG").value))||20, usosMolde:Math.round(N($("#cvU").value))||50,
-      pabPrecioS:N($("#cvPS").value), pabPrecioM:N($("#cvPM").value), pabPrecioL:N($("#cvPL").value), domicilioCosto:N($("#cvDom").value)}, true);
+      pabPrecioS:N($("#cvPS").value), pabPrecioM:N($("#cvPM").value), pabPrecioL:N($("#cvPL").value), domicilioCosto:N($("#cvDom").value), descDesde:Math.round(N($("#cvDD").value)), descPct:N($("#cvDP").value)}, true);
     render(); toast("Conversión actualizada");
   });
   const calcSel = $("#qnF"), calcCant = $("#qnC");
@@ -532,6 +541,7 @@ function editPedido(p0){
       <p class="hint" id="pEH" style="margin:0"></p></div>
     <div><h3>Abonos</h3><div class="lines" id="pAbo"></div><button class="btn small" id="pAddA" style="margin-top:8px">+ Registrar abono</button></div>
     <label for="pNot">Notas<textarea id="pNot" rows="2">${esc(p.notas)}</textarea></label>
+    <label id="pDW" style="flex-direction:row;align-items:center;gap:8px;font-weight:500" hidden><input type="checkbox" id="pDA" style="width:auto"> <span id="pDT"></span></label>
     <div class="panel" id="pSum"></div>
     <details class="panel" id="pInsW"><summary style="cursor:pointer;font-weight:600">Insumos para este pedido</summary><div id="pIns" style="margin-top:10px"></div></details>
     <div class="row" style="justify-content:space-between"><button class="btn danger" id="pDel" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="pSave">Guardar pedido</button></div>`,
@@ -587,14 +597,17 @@ function editPedido(p0){
     const sum = () => {
       domicilio(false);
       const c = pedidoCalc(p);
+      $("#pDW",d).hidden = !c.descAplica; $("#pDA",d).checked = c.descOn;
+      $("#pDT",d).textContent = `Descuento por cantidad: ${N(S.cfg.descPct)}% por llevar más de ${N(S.cfg.descDesde)} velas${p.items.some(i=>i.comboId) ? " (no se aplica a los combos, que ya tienen su precio especial)" : ""}`;
       $("#pIns",d).innerHTML = tablaInsumos(p.items);
-      $("#pSum",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas</dt><dd class="num">${$$(c.ventas)}</dd><dt>Domicilio cobrado</dt><dd class="num">${$$(c.envio)}</dd>
+      $("#pSum",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas</dt><dd class="num">${$$(c.ventas + c.descuento)}</dd>${c.descuento?`<dt>Descuento por cantidad (${N(S.cfg.descPct)}%)</dt><dd class="num" style="color:var(--ember)">−${$$(c.descuento)}</dd>`:""}<dt>Domicilio cobrado</dt><dd class="num">${$$(c.envio)}</dd>
       <dt class="total">Total</dt><dd class="total num">${$$(c.total)}</dd><dt>Pagado</dt><dd class="num">${$$(c.pagado)}</dd>
       <dt class="total">Saldo</dt><dd class="total num" style="color:${c.saldo>0?"var(--ember)":"var(--ok)"}">${$$(c.saldo)}</dd>
       <dt>Tu mano de obra</dt><dd class="num">${$$(c.mo)}</dd>${c.envioAsumido?`<dt>Domicilio que asumes</dt><dd class="num" style="color:var(--bad)">−${$$(c.envioAsumido)}</dd>`:""}<dt>Ganancia empresa</dt><dd class="num" style="color:${c.ganancia<0?"var(--bad)":"inherit"}">${$$(c.ganancia)}</dd></dl>`;
     };
     $("#pEnv",d).oninput = sum; $("#pEC",d).oninput = sum;
     $("#pEM",d).onchange = () => { domicilio(true); sum(); };
+    $("#pDA",d).onchange = () => { p.descAplicar = $("#pDA",d).checked; sum(); };
     $("#pAddI",d).onclick = () => { p.items.push(S.fichas[0] ? itemFromFicha(S.fichas[0],1) : {fichaId:"",nombre:"Vela personalizada",cant:1,precio:0,costo:0,mo:0}); drawItems(); };
     $("#pAddA",d).onclick = () => { p.abonos.push({fecha:ymd(today()), monto:0}); drawAbonos(); };
     $("#pSave",d).onclick = async () => {
