@@ -1,0 +1,16 @@
+{
+  "name": "Magma & Mecha · Taller",
+  "short_name": "Magma & Mecha",
+  "description": "Pedidos, tandas, moldes, costeo y resumen mensual del taller de velas.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f1efec",
+  "theme_color": "#d9480f",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
