@@ -143,7 +143,7 @@ tfoot td{font-weight:600;border-bottom:0}
 </head>
 <body>
 <header class="top"><div class="wrap">
-  <div class="brand"><h1>Magma <span class="amp">&amp;</span> Mecha</h1><span>Taller · pedidos, tandas y costos</span><button class="btn small" id="btnResp" style="margin-left:auto">Respaldo</button></div>
+  <div class="brand"><h1>Magma <span class="amp">&amp;</span> Mecha</h1><span>Taller · pedidos, tandas y costos</span><span class="row" style="margin-left:auto;gap:6px"><button class="btn small" id="btnSync">Sincronizar</button><button class="btn small" id="btnResp">Respaldo</button></span></div>
   <nav class="tabs" role="tablist" id="tabs">
     <button role="tab" data-tab="pedidos" aria-selected="true">Pedidos</button>
     <button role="tab" data-tab="tandas">Tandas</button>
@@ -155,6 +155,9 @@ tfoot td{font-weight:600;border-bottom:0}
 <main class="wrap" id="main"><p class="status">Cargando tu taller…</p></main>
 <div id="layer"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 (() => {
 const $ = (s, el=document) => el.querySelector(s);
@@ -634,13 +637,129 @@ async function saveDoc(col, id, body, quiet){
   if(!persist()){ if(prev) store[col][id] = prev; else delete store[col][id]; return false; }
   syncState();
   if(col !== "config") render();
+  cloudSet(col, id, body);
   return true;
 }
 async function delDoc(col, id){
   const prev = store[col][id];
   delete store[col][id];
   if(!persist()){ store[col][id] = prev; return false; }
-  syncState(); render(); return true;
+  syncState(); render();
+  cloudDel(col, id);
+  return true;
+}
+
+// ---------- sincronización en la nube (Firebase) ----------
+const FB_CONFIG = {
+  apiKey: "AIzaSyD67UejuKYzXELmUAeI8CVvKc89x-5p9Uk",
+  authDomain: "magma-mecha.firebaseapp.com",
+  projectId: "magma-mecha",
+  storageBucket: "magma-mecha.firebasestorage.app",
+  messagingSenderId: "609538390838",
+  appId: "1:609538390838:web:ab35255f55b7bbe4ca5197"
+};
+const COLS = ["pedidos","moldes","fichas","config"];
+const SYNC = { ok:false, user:null, fs:null, auth:null, unsubs:[], estado:"local", error:"" };
+function initCloud(){
+  if(!window.firebase){ SYNC.estado = "sin-sdk"; paintSync(); return; }
+  try {
+    firebase.initializeApp(FB_CONFIG);
+    SYNC.auth = firebase.auth(); SYNC.fs = firebase.firestore();
+    SYNC.fs.enablePersistence({ synchronizeTabs:true }).catch(()=>{});
+    SYNC.ok = true;
+    SYNC.auth.getRedirectResult().catch(e => { SYNC.error = authMsg(e); paintSync(); });
+    SYNC.auth.onAuthStateChanged(u => { if(u) conectar(u); else desconectar(); });
+  } catch(e){ SYNC.estado = "sin-sdk"; paintSync(); }
+}
+function authMsg(e){
+  const c = e && e.code || "";
+  if(c.includes("unauthorized-domain")) return "Firebase no tiene autorizado este dominio. Agrega jeimmymol.github.io en Authentication → Configuración → Dominios autorizados.";
+  if(c.includes("operation-not-allowed")) return "El inicio con Google no está habilitado. Actívalo en Authentication → Método de acceso → Google.";
+  if(c.includes("popup-closed") || c.includes("cancelled")) return "";
+  if(c.includes("network")) return "Sin conexión a internet. Inténtalo cuando tengas señal.";
+  return "No se pudo iniciar sesión (" + (c || "error") + ").";
+}
+async function iniciarSesion(){
+  if(!SYNC.ok){ toast("La sincronización necesita internet la primera vez."); return; }
+  const prov = new firebase.auth.GoogleAuthProvider();
+  prov.setCustomParameters({ prompt:"select_account" });
+  SYNC.error = "";
+  try { await SYNC.auth.signInWithPopup(prov); }
+  catch(e){
+    if((e.code||"").includes("popup-blocked") || (e.code||"").includes("operation-not-supported")){ try { await SYNC.auth.signInWithRedirect(prov); return; } catch(e2){ e = e2; } }
+    SYNC.error = authMsg(e); paintSync(); if(SYNC.error) toast(SYNC.error);
+  }
+}
+const userCol = (col) => SYNC.fs.collection("usuarios").doc(SYNC.user.uid).collection(col);
+async function conectar(u){
+  SYNC.user = u; SYNC.estado = "subiendo"; paintSync();
+  try {
+    // 1. sube lo que este dispositivo tenga y la nube no
+    for(const col of COLS){
+      const snap = await userCol(col).get();
+      const remotos = new Set(snap.docs.map(d => d.id));
+      const faltan = Object.entries(store[col]).filter(([id]) => !remotos.has(id));
+      for(let i = 0; i < faltan.length; i += 400){
+        const b = SYNC.fs.batch();
+        faltan.slice(i, i+400).forEach(([id, body]) => b.set(userCol(col).doc(id), body));
+        await b.commit();
+      }
+    }
+    // 2. escucha los cambios de la nube
+    SYNC.unsubs.forEach(f => f()); SYNC.unsubs = [];
+    COLS.forEach(col => SYNC.unsubs.push(userCol(col).onSnapshot(snap => {
+      const o = {}; snap.docs.forEach(d => o[d.id] = d.data());
+      store[col] = o; persist(); syncState();
+      SYNC.estado = snap.metadata.fromCache ? "sin-red" : "ok"; paintSync();
+      const typing = document.activeElement && document.activeElement.closest("#main") && document.activeElement.matches("input,select,textarea");
+      if(!$("#ov") && !typing) render();
+    }, e => { SYNC.estado = "error"; SYNC.error = "La nube rechazó la conexión. Revisa las reglas de Firestore."; paintSync(); })));
+  } catch(e){
+    SYNC.estado = "error";
+    SYNC.error = (e.code||"").includes("permission") ? "La nube rechazó la conexión. Revisa que publicaste las reglas de Firestore." : "No se pudo conectar con la nube. Tus datos siguen guardados en este equipo.";
+    paintSync();
+  }
+}
+function desconectar(){ SYNC.unsubs.forEach(f => f()); SYNC.unsubs = []; SYNC.user = null; SYNC.estado = "local"; paintSync(); }
+function cloudSet(col, id, body){ if(SYNC.user && SYNC.fs) userCol(col).doc(id).set(body).catch(()=>{ toast("Guardado en el equipo; no se pudo subir a la nube."); }); }
+function cloudDel(col, id){ if(SYNC.user && SYNC.fs) userCol(col).doc(id).delete().catch(()=>{}); }
+async function reemplazarNube(){
+  if(!SYNC.user) return;
+  for(const col of COLS){
+    const snap = await userCol(col).get();
+    const ops = [];
+    snap.docs.forEach(d => { if(!store[col][d.id]) ops.push(["del", d.id]); });
+    Object.entries(store[col]).forEach(([id, body]) => ops.push(["set", id, body]));
+    for(let i = 0; i < ops.length; i += 400){
+      const b = SYNC.fs.batch();
+      ops.slice(i, i+400).forEach(o => o[0] === "del" ? b.delete(userCol(col).doc(o[1])) : b.set(userCol(col).doc(o[1]), o[2]));
+      await b.commit();
+    }
+  }
+}
+function paintSync(){
+  const b = $("#btnSync"); if(!b) return;
+  const txt = { local:"Sincronizar", subiendo:"Conectando…", ok:"✓ Sincronizado", "sin-red":"Sin red · guarda aquí", error:"⚠ Sincronizar", "sin-sdk":"Sincronizar" }[SYNC.estado] || "Sincronizar";
+  b.textContent = txt;
+  b.style.color = SYNC.estado === "ok" ? "var(--ok)" : SYNC.estado === "error" ? "var(--bad)" : "";
+}
+function abrirSync(){
+  const u = SYNC.user;
+  drawer("Sincronizar equipos", u ? `
+    <p class="lede" style="margin:0">Estás conectada como <b>${esc(u.email || u.displayName || "")}</b>. Lo que anotes aquí aparece en tus otros equipos donde inicies sesión con la misma cuenta.</p>
+    <div class="panel"><dl class="kv"><dt>Estado</dt><dd>${SYNC.estado === "ok" ? "Al día" : SYNC.estado === "sin-red" ? "Sin internet: guardo aquí y subo al volver la señal" : SYNC.estado === "error" ? "Con problemas" : "Conectando…"}</dd>
+    <dt>Pedidos</dt><dd class="num">${S.pedidos.length}</dd><dt>Moldes</dt><dd class="num">${S.moldes.length}</dd><dt>Fichas</dt><dd class="num">${S.fichas.length}</dd></dl></div>
+    ${SYNC.error ? `<p class="hint" style="color:var(--bad);margin:0">${esc(SYNC.error)}</p>` : ""}
+    <button class="btn" id="sOut">Cerrar sesión en este equipo</button>
+    <p class="hint" style="margin:0">Al cerrar sesión tus datos se quedan guardados en este equipo, pero deja de sincronizar.</p>` : `
+    <p class="lede" style="margin:0">Inicia sesión con tu cuenta de Google en cada equipo (portátil, celular, computador de escritorio) y tus pedidos, moldes y fichas se mantienen iguales en todos.</p>
+    <p class="hint" style="margin:0">La primera vez subo a la nube lo que ya tengas en este equipo; no se borra nada. Usa siempre la misma cuenta de Google.</p>
+    ${SYNC.error ? `<p class="hint" style="color:var(--bad);margin:0">${esc(SYNC.error)}</p>` : ""}
+    <button class="btn primary" id="sIn">Iniciar sesión con Google</button>`,
+  (d, close) => {
+    const i = $("#sIn",d); if(i) i.onclick = async () => { await iniciarSesion(); if(SYNC.user) close(); };
+    const o = $("#sOut",d); if(o) o.onclick = async () => { await SYNC.auth.signOut(); close(); toast("Sesión cerrada en este equipo"); };
+  });
 }
 function diasSinRespaldo(){ const t = store.meta.ultimoRespaldo; return t ? Math.floor((Date.now() - new Date(t)) / 86400000) : null; }
 function hayDatos(){ return S.pedidos.length + S.moldes.length + S.fichas.length > 0; }
@@ -664,6 +783,7 @@ function restaurarRespaldo(file, done){
       ["pedidos","moldes","fichas","config"].forEach(k => store[k] = d[k] || {});
       if(!persist()){ Object.assign(store, JSON.parse(antes)); return; }
       syncState(); render(); done && done();
+      reemplazarNube().catch(()=>toast("Restaurado en este equipo; no se pudo actualizar la nube."));
       toast(`Copia restaurada: ${S.pedidos.length} pedidos, ${S.moldes.length} moldes, ${S.fichas.length} fichas`);
     } catch(e){ toast("Ese archivo no es una copia de Magma & Mecha. Elige el archivo .json que descargaste."); }
   };
@@ -703,6 +823,8 @@ S.db = true; Object.keys(S.loaded).forEach(k => S.loaded[k] = true);
 loadStore();
 try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch(e){}
 $("#btnResp").onclick = abrirRespaldo;
+$("#btnSync").onclick = abrirSync;
+initCloud();
 render();
 })();
 </script>
