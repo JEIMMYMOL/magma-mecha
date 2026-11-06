@@ -149,6 +149,7 @@ tfoot td{font-weight:600;border-bottom:0}
     <button role="tab" data-tab="tandas">Tandas</button>
     <button role="tab" data-tab="moldes">Moldes y pabilo</button>
     <button role="tab" data-tab="costeo">Costeo</button>
+    <button role="tab" data-tab="compras">Compras</button>
     <button role="tab" data-tab="mes">Mes a mes</button>
   </nav>
 </div></header>
@@ -176,8 +177,8 @@ const MESES_L = ["enero","febrero","marzo","abril","mayo","junio","julio","agost
 const fmtD = s => { const d = parseD(s); return d ? `${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()}` : "—"; };
 const DIAS = ["dom","lun","mar","mié","jue","vie","sáb"];
 
-const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50 };
-const S = { tab:"pedidos", filtro:"activos", soloEntregados:false, pedidos:[], moldes:[], fichas:[], cfg:{...DEFAULT_CFG}, loaded:{p:false,m:false,f:false,c:false}, db:null, offline:false, calc:{lines:[], inicio:ymd(today())} };
+const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50, pabPrecioS:1200, pabPrecioM:1500, pabPrecioL:1800, domicilioCosto:21000 };
+const S = { tab:"pedidos", filtro:"activos", soloEntregados:false, pedidos:[], moldes:[], fichas:[], combos:[], precios:[], cfg:{...DEFAULT_CFG}, loaded:{p:false,m:false,f:false,c:false}, db:null, offline:false, calc:{lines:[], inicio:ymd(today())} };
 
 // ---------- cálculos ----------
 function fichaCalc(f){
@@ -191,22 +192,77 @@ function fichaCalc(f){
 }
 const ENVASES_ESENCIA = [25,120,150,250,500,1000];
 const FRASCOS_COLORANTE = [10,30,60];
-function insTipo(i){ return i.tipo || (/esencia|fragancia|aroma/i.test(i.nombre||"") ? "esencia" : /colorante/i.test(i.nombre||"") ? "colorante" : "general"); }
+function insTipo(i){ return i.tipo || (/esencia|fragancia|aroma/i.test(i.nombre||"") ? "esencia" : /colorante/i.test(i.nombre||"") ? "colorante" : /pabilo|mecha/i.test(i.nombre||"") ? "pabilo" : "general"); }
+const TALLAS = ["S","M","L"];
+function pabPrecioMetro(t){ return N(S.cfg["pabPrecio"+(t||"M")]); }
 function insRinde(i){
   const t = insTipo(i), q = N(i.compraCant);
   if(t === "esencia") return q * Math.max(0.1, N(S.cfg.densEsencia) || 0.95);
   if(t === "colorante") return q * Math.max(1, N(S.cfg.gotasMl) || 20);
   return q;
 }
-function insCost(i){ const r = insRinde(i); return r > 0 ? N(i.compraPrecio) / r * N(i.uso) : 0; }
+function insCost(i){
+  if(insTipo(i) === "pabilo") return pabPrecioMetro(i.talla) / 100 * N(i.uso);
+  const r = insRinde(i); return r > 0 ? N(i.compraPrecio) / r * N(i.uso) : 0;
+}
+function insUnidad(i){ const t = insTipo(i); return t === "esencia" ? "g" : t === "colorante" ? "gotas" : t === "pabilo" ? "cm" : (i.unidad || "und"); }
+// insumos que gasta una lista de líneas {fichaId|comboId, cant}
+function insumosPara(lineas){
+  const acc = {};
+  const sumar = (f, cant) => {
+    (f.insumos||[]).forEach(i => {
+      const t = insTipo(i), u = insUnidad(i);
+      const nombre = t === "pabilo" ? `Pabilo ${i.talla||"M"}` : (i.nombre || "Insumo");
+      const k = (nombre + "|" + u).toLowerCase();
+      const r = acc[k] ||= { nombre, unidad:u, tipo:t, cantidad:0, costo:0 };
+      r.cantidad += N(i.uso) * cant; r.costo += insCost(i) * cant;
+    });
+    const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId);
+    if(mo){ const k = ("molde " + mo.nombre).toLowerCase(); const r = acc[k] ||= { nombre:`Molde ${mo.nombre}`, unidad:"vaciados", tipo:"molde", cantidad:0, costo:0 }; r.cantidad += cant; r.costo += moldeCost(f) * cant; }
+  };
+  lineas.forEach(l => {
+    const cant = N(l.cant); if(!cant) return;
+    if(l.comboId){ const c = S.combos.find(x=>x.id===l.comboId); (c?.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(f) sumar(f, cant*N(ci.cant)); }); }
+    else { const f = S.fichas.find(x=>x.id===l.fichaId); if(f) sumar(f, cant); }
+  });
+  return Object.values(acc).sort((a,b)=>a.nombre.localeCompare(b.nombre));
+}
+function fmtCant(r){
+  const n = r.cantidad, f = v => (Math.round(v*10)/10).toLocaleString("es-CO");
+  if(r.tipo === "esencia") return `${f(n)} g <span class="hint">≈ ${f(n/(N(S.cfg.densEsencia)||0.95))} ml</span>`;
+  if(r.tipo === "colorante") return `${Math.round(n)} gotas <span class="hint">≈ ${f(n/(N(S.cfg.gotasMl)||20))} ml</span>`;
+  if(r.tipo === "pabilo") return `${f(n)} cm <span class="hint">≈ ${f(n/100)} m</span>`;
+  if(r.unidad === "g" && n >= 1000) return `${f(n)} g <span class="hint">≈ ${f(n/1000)} kg</span>`;
+  return `${f(n)} ${esc(r.unidad)}`;
+}
+function tablaInsumos(lineas){
+  const rows = insumosPara(lineas);
+  if(!rows.length) return `<p class="hint" style="margin:0">Elige velas que tengan ficha de costeo para ver los insumos.</p>`;
+  const total = rows.reduce((a,r)=>a+r.costo,0);
+  return `<div class="tbl-wrap"><table><thead><tr><th>Insumo</th><th class="r">Cantidad</th><th class="r">Costo</th></tr></thead><tbody>
+  ${rows.map(r=>`<tr><td>${esc(r.nombre)}</td><td class="r num">${fmtCant(r)}</td><td class="r num">${$$(r.costo)}</td></tr>`).join("")}</tbody>
+  <tfoot><tr><td>Total insumos</td><td></td><td class="r num">${$$(total)}</td></tr></tfoot></table></div>`;
+}
+// combos
+function comboCalc(c){
+  let normal=0, insumos=0, mo=0, velas=0;
+  (c.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(!f) return; const fc = fichaCalc(f), q = N(ci.cant); velas += q; normal += fc.precio*q; insumos += fc.insumos*q; mo += fc.mo*q; });
+  const precio = N(c.precio) || normal;
+  const ganancia = precio - insumos - mo, gananciaNormal = normal - insumos - mo;
+  return { velas, normal, insumos, mo, precio, ganancia, gananciaNormal, minimo: insumos + mo,
+    descuento: normal > 0 ? 1 - precio/normal : 0, margen: precio > 0 ? ganancia/precio : 0,
+    conserva: gananciaNormal > 0 ? ganancia/gananciaNormal : 0 };
+}
 function moldeCost(f){ const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId); return mo && N(mo.precio) > 0 ? N(mo.precio) / Math.max(1, N(S.cfg.usosMolde) || 50) : 0; }
 function pedidoCalc(p){
   let ventas=0, insumos=0, mo=0, velas=0;
-  (p.items||[]).forEach(it => { const c = N(it.cant); velas += c; ventas += c*N(it.precio); insumos += c*N(it.costo); mo += c*N(it.mo); });
+  (p.items||[]).forEach(it => { const c = N(it.cant); velas += c*(N(it.velas)||1); ventas += c*N(it.precio); insumos += c*N(it.costo); mo += c*N(it.mo); });
   const envio = N(p.envio);
+  const envioCosto = p.envioCosto === undefined || p.envioCosto === null || p.envioCosto === "" ? envio : N(p.envioCosto);
+  const envioAsumido = Math.max(0, envioCosto - envio);
   const total = ventas + envio;
   const pagado = (p.abonos||[]).reduce((a,b)=>a+N(b.monto),0);
-  return { velas, ventas, envio, total, insumos, mo, ganancia: ventas - insumos - mo, pagado, saldo: Math.max(0, total - pagado) };
+  return { velas, ventas, envio, envioCosto, envioAsumido, total, insumos, mo, ganancia: ventas - insumos - mo - envioAsumido, pagado, saldo: Math.max(0, total - pagado) };
 }
 function pabilo(diam){
   const d = N(diam), c = S.cfg;
@@ -234,7 +290,7 @@ function render(){
   const m = $("#main");
   if(S.storageError){ m.innerHTML = `<div class="empty"><strong>Este navegador no deja guardar datos</strong>Abre la app desde Chrome o Safari normal (no en modo incógnito) para que se guarden tus pedidos.</div>`; return; }
   if(!ready){ m.innerHTML = `<p class="status">${S.offline ? "No logro conectar con tus datos todavía. Revisa tu conexión." : "Cargando tu taller…"}</p>`; return; }
-  ({pedidos:rPedidos, tandas:rTandas, moldes:rMoldes, costeo:rCosteo, mes:rMes})[S.tab](m);
+  ({pedidos:rPedidos, tandas:rTandas, moldes:rMoldes, costeo:rCosteo, compras:rCompras, mes:rMes})[S.tab](m);
 }
 
 function rPedidos(m){
@@ -262,7 +318,7 @@ function orderCard(p){
   const c = pedidoCalc(p), u = urgencia(p);
   const sCls = p.estado==="entregado" ? "s-ok" : u && u.cls ? "s-"+u.cls : "";
   const pct = c.total>0 ? Math.min(100, c.pagado/c.total*100) : 0;
-  const det = (p.items||[]).map(i=>`${N(i.cant)} ${i.nombre}`).join(", ");
+  const det = (p.items||[]).map(i=>`${N(i.cant)} ${i.nombre}${i.comboId?" (combo)":""}`).join(", ");
   return `<div class="order ${sCls}" data-pid="${esc(p.id)}" tabindex="0"><div class="stripe"></div>
   <div class="body"><div class="name">${esc(p.cliente||"Sin nombre")}</div>
   <div class="meta">${esc(det||"Sin velas")}${p.telefono?` · ${esc(p.telefono)}`:""}</div>
@@ -369,17 +425,37 @@ function rCosteo(m){
   <div class="panel">${S.fichas.length ? `<div class="tbl-wrap"><table><thead><tr><th>Vela</th><th class="r">Insumos</th><th class="r">Mano de obra</th><th class="r">Ganancia</th><th class="r">Precio</th></tr></thead><tbody>
   ${S.fichas.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(f=>{ const c=fichaCalc(f); return `<tr class="click" data-fid="${esc(f.id)}"><td><b>${esc(f.nombre)}</b>${f.moldeId?`<div class="hint">${esc(S.moldes.find(x=>x.id===f.moldeId)?.nombre||"")}</div>`:""}</td><td class="r num">${$$(c.insumos)}</td><td class="r num">${$$(c.mo)}</td><td class="r num" style="color:${c.ganancia<0?"var(--bad)":"inherit"}">${$$(c.ganancia)}</td><td class="r num"><b>${$$(c.precio)}</b></td></tr>`}).join("")}
   </tbody></table></div>` : `<div class="empty"><strong>Aún no hay fichas</strong>Crea una ficha por diseño de vela con sus insumos (cera, esencia, colorante, mica, pabilo, pegatina, bolsa).</div>`}</div>
+  <div class="sec-head" style="margin-top:26px"><div><h2>Combos</h2><p class="lede">Paquetes de varias velas a un precio especial. Te muestro cuánto descuento das y cuánta ganancia conservas, para que armes ofertas sin perder margen.</p></div>
+  <button class="btn primary" id="nuevoC">+ Nuevo combo</button></div>
+  <div class="panel">${S.combos.length ? `<div class="tbl-wrap"><table><thead><tr><th>Combo</th><th class="r">Velas</th><th class="r">Precio normal</th><th class="r">Precio combo</th><th class="r">Descuento</th><th class="r">Ganancia</th></tr></thead><tbody>
+  ${S.combos.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(cb=>{ const c = comboCalc(cb); const cls = c.ganancia < 0 ? "bad" : c.conserva < .6 ? "warn" : "ok"; return `<tr class="click" data-cid="${esc(cb.id)}"><td><b>${esc(cb.nombre)}</b></td><td class="r num">${c.velas}</td><td class="r num">${$$(c.normal)}</td><td class="r num"><b>${$$(c.precio)}</b></td><td class="r num">${Math.round(c.descuento*100)}%</td><td class="r num"><span class="pill ${cls}">${$$(c.ganancia)}</span></td></tr>`}).join("")}
+  </tbody></table></div>` : `<div class="empty"><strong>Aún no hay combos</strong>${S.fichas.length ? "Crea uno juntando varias velas de tus fichas." : "Primero crea fichas de costeo; los combos se arman con ellas."}</div>`}</div>
+  <div class="panel" style="margin-top:14px"><h3>¿Cuántos insumos necesito?</h3>
+  ${S.fichas.length ? `<div class="grid"><label for="qnF">Vela o combo<select id="qnF">${S.fichas.map(f=>`<option value="${esc(f.id)}">${esc(f.nombre)}</option>`).join("")}${S.combos.length?`<optgroup label="Combos">${S.combos.map(c=>`<option value="combo:${esc(c.id)}">${esc(c.nombre)}</option>`).join("")}</optgroup>`:""}</select></label>
+  <label for="qnC">Cantidad<input id="qnC" type="number" min="0" value="10"></label></div><div id="qnR" style="margin-top:12px"></div>` : `<p class="hint" style="margin:0">Cuando tengas fichas, aquí calculas cuánta cera, esencia y demás necesitas para cualquier cantidad.</p>`}</div>
   <div class="panel" style="margin-top:14px"><h3>Conversiones</h3>
   <p class="hint" style="margin:0 0 12px">La esencia se compra en mililitros pero se pesa en gramos, y el colorante se compra por frasco pero se usa por gotas. Con estos valores hago la conversión. Si pesas 10 ml de tu esencia en la gramera y te da 9,5 g, la densidad es 0,95.</p>
   <div class="grid">
     <label for="cvD">Densidad de la esencia (g por ml)<input id="cvD" type="number" step="0.01" min="0.5" max="1.5" value="${N(S.cfg.densEsencia)}"></label>
     <label for="cvG">Gotas de colorante por ml<input id="cvG" type="number" step="1" min="1" value="${N(S.cfg.gotasMl)}"></label>
     <label for="cvU">Usos de cada molde<input id="cvU" type="number" step="1" min="1" value="${N(S.cfg.usosMolde)}"></label>
+  </div>
+  <h3 style="margin:16px 0 8px">Pabilo de algodón (precio por metro)</h3>
+  <div class="grid">
+    <label for="cvPS">Tamaño S<input id="cvPS" type="number" step="100" min="0" value="${N(S.cfg.pabPrecioS)}"></label>
+    <label for="cvPM">Tamaño M<input id="cvPM" type="number" step="100" min="0" value="${N(S.cfg.pabPrecioM)}"></label>
+    <label for="cvPL">Tamaño L<input id="cvPL" type="number" step="100" min="0" value="${N(S.cfg.pabPrecioL)}"></label>
+    <label for="cvDom">Domicilio usual ($)<input id="cvDom" type="number" step="500" min="0" value="${N(S.cfg.domicilioCosto)}"></label>
   </div></div>`;
-  ["cvD","cvG","cvU"].forEach(id => $("#"+id).onchange = async () => {
-    await saveDoc("config","ajustes",{...S.cfg, densEsencia:N($("#cvD").value)||0.95, gotasMl:Math.round(N($("#cvG").value))||20, usosMolde:Math.round(N($("#cvU").value))||50}, true);
+  ["cvD","cvG","cvU","cvPS","cvPM","cvPL","cvDom"].forEach(id => $("#"+id).onchange = async () => {
+    await saveDoc("config","ajustes",{...S.cfg, densEsencia:N($("#cvD").value)||0.95, gotasMl:Math.round(N($("#cvG").value))||20, usosMolde:Math.round(N($("#cvU").value))||50,
+      pabPrecioS:N($("#cvPS").value), pabPrecioM:N($("#cvPM").value), pabPrecioL:N($("#cvPL").value), domicilioCosto:N($("#cvDom").value)}, true);
     render(); toast("Conversión actualizada");
   });
+  const calcSel = $("#qnF"), calcCant = $("#qnC");
+  if(calcSel){ const upd = () => { const v = calcSel.value; $("#qnR").innerHTML = tablaInsumos([v.startsWith("combo:") ? {comboId:v.slice(6), cant:N(calcCant.value)} : {fichaId:v, cant:N(calcCant.value)}]); }; calcSel.onchange = upd; calcCant.oninput = upd; upd(); }
+  $("#nuevoC").onclick = () => editCombo(null);
+  m.querySelectorAll("[data-cid]").forEach(r => r.onclick = () => editCombo(S.combos.find(x=>x.id===r.dataset.cid)));
   $("#nuevaF").onclick = () => editFicha(null);
   m.querySelectorAll("[data-fid]").forEach(r => r.onclick = () => editFicha(S.fichas.find(x=>x.id===r.dataset.fid)));
 }
@@ -391,8 +467,8 @@ function rMes(m){
     if(S.soloEntregados && p.estado!=="entregado") return;
     const k = p.fechaEntrega.slice(0,7);
     const c = pedidoCalc(p);
-    const r = meses[k] ||= {k, n:0, velas:0, ventas:0, insumos:0, mo:0, ganancia:0, pagado:0, saldo:0};
-    r.n++; r.velas+=c.velas; r.ventas+=c.total; r.insumos+=c.insumos; r.mo+=c.mo; r.ganancia+=c.ganancia; r.pagado+=c.pagado; r.saldo+=c.saldo;
+    const r = meses[k] ||= {k, n:0, velas:0, ventas:0, insumos:0, mo:0, ganancia:0, pagado:0, saldo:0, dom:0};
+    r.n++; r.velas+=c.velas; r.ventas+=c.total; r.insumos+=c.insumos; r.mo+=c.mo; r.ganancia+=c.ganancia; r.pagado+=c.pagado; r.saldo+=c.saldo; r.dom+=c.envioAsumido;
   });
   const rows = Object.values(meses).sort((a,b)=>b.k.localeCompare(a.k));
   const lbl = k => { const [y,mm] = k.split("-").map(Number); return `${MESES_L[mm-1]} ${y}`; };
@@ -411,9 +487,9 @@ function rMes(m){
   <div class="panel"><h3>Últimos meses</h3>
   <div class="chart">${last.map(r=>{ const hm=Math.max(0,r.mo)/max*130, hg=Math.max(0,r.ganancia)/max*130; return `<div class="col"><div class="stk" title="${esc(lbl(r.k))}: mano de obra ${$$(r.mo)}, ganancia ${$$(r.ganancia)}"><div class="mo" style="height:${hm}px"></div><div class="ga" style="height:${hg}px"></div></div><div class="lbl">${MESES[+r.k.slice(5)-1]} ${r.k.slice(2,4)}</div></div>`}).join("")}</div>
   <div class="legend"><span><i style="background:var(--wick)"></i>Mano de obra</span><span><i style="background:var(--ember)"></i>Ganancia empresa</span></div></div>
-  <div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Mes</th><th class="r">Pedidos</th><th class="r">Velas</th><th class="r">Ventas</th><th class="r">Insumos</th><th class="r">Mano de obra</th><th class="r">Ganancia</th><th class="r">Cobrado</th><th class="r">Por cobrar</th></tr></thead>
-  <tbody>${rows.map(r=>`<tr><td style="text-transform:capitalize">${lbl(r.k)}</td><td class="r num">${r.n}</td><td class="r num">${r.velas}</td><td class="r num">${$$(r.ventas)}</td><td class="r num">${$$(r.insumos)}</td><td class="r num">${$$(r.mo)}</td><td class="r num">${$$(r.ganancia)}</td><td class="r num">${$$(r.pagado)}</td><td class="r num">${$$(r.saldo)}</td></tr>`).join("")}</tbody></table></div>
-  <p class="hint" style="margin:10px 0 0">Las ventas incluyen lo que cobras de envío; la ganancia se calcula solo sobre las velas.</p></div></div>`}`;
+  <div class="panel"><div class="tbl-wrap"><table><thead><tr><th>Mes</th><th class="r">Pedidos</th><th class="r">Velas</th><th class="r">Ventas</th><th class="r">Insumos</th><th class="r">Mano de obra</th><th class="r">Domicilios que asumiste</th><th class="r">Ganancia</th><th class="r">Cobrado</th><th class="r">Por cobrar</th></tr></thead>
+  <tbody>${rows.map(r=>`<tr><td style="text-transform:capitalize">${lbl(r.k)}</td><td class="r num">${r.n}</td><td class="r num">${r.velas}</td><td class="r num">${$$(r.ventas)}</td><td class="r num">${$$(r.insumos)}</td><td class="r num">${$$(r.mo)}</td><td class="r num">${$$(r.dom)}</td><td class="r num">${$$(r.ganancia)}</td><td class="r num">${$$(r.pagado)}</td><td class="r num">${$$(r.saldo)}</td></tr>`).join("")}</tbody></table></div>
+  <p class="hint" style="margin:10px 0 0">Las ventas incluyen lo que cobras de domicilio. La ganancia ya descuenta los domicilios que asumiste tú.</p></div></div>`}`;
   $("#tgE").onclick = () => { S.soloEntregados = !S.soloEntregados; render(); };
 }
 
@@ -445,27 +521,40 @@ function editPedido(p0){
     <div class="grid"><label for="pFe">Fecha de entrega<input id="pFe" type="date" value="${esc(p.fechaEntrega)}"></label>
     <label for="pEs">Estado<select id="pEs">${Object.entries(ESTADOS).map(([k,v])=>`<option value="${k}" ${p.estado===k?"selected":""}>${v}</option>`).join("")}</select></label></div>
     <div><h3>Velas</h3><div class="lines" id="pItems"></div><button class="btn small" id="pAddI" style="margin-top:8px">+ Agregar vela</button></div>
-    <label for="pEnv">Envío que cobras al cliente<input id="pEnv" type="number" min="0" step="500" value="${N(p.envio)}"></label>
+    <div class="panel stack"><h3 style="margin:0">Domicilio</h3>
+      <label for="pEM">¿Quién paga el domicilio?<select id="pEM">
+        <option value="sin" ${p.envioModo==="sin"?"selected":""}>Sin domicilio (recoge el cliente)</option>
+        <option value="cliente" ${p.envioModo==="cliente"||(!p.envioModo&&N(p.envio)>0)?"selected":""}>Lo paga el cliente</option>
+        <option value="yo" ${p.envioModo==="yo"?"selected":""}>Lo asumo yo (envío gratis)</option>
+        <option value="parcial" ${p.envioModo==="parcial"?"selected":""}>Compartido (le doy un bono)</option></select></label>
+      <div class="grid"><label for="pEC">Lo que me cobra el domiciliario<input id="pEC" type="number" min="0" step="500" value="${p.envioCosto===undefined?(N(p.envio)||N(S.cfg.domicilioCosto)):N(p.envioCosto)}"></label>
+      <label for="pEnv">Le cobro al cliente<input id="pEnv" type="number" min="0" step="500" value="${N(p.envio)}"></label></div>
+      <p class="hint" id="pEH" style="margin:0"></p></div>
     <div><h3>Abonos</h3><div class="lines" id="pAbo"></div><button class="btn small" id="pAddA" style="margin-top:8px">+ Registrar abono</button></div>
     <label for="pNot">Notas<textarea id="pNot" rows="2">${esc(p.notas)}</textarea></label>
     <div class="panel" id="pSum"></div>
+    <details class="panel" id="pInsW"><summary style="cursor:pointer;font-weight:600">Insumos para este pedido</summary><div id="pIns" style="margin-top:10px"></div></details>
     <div class="row" style="justify-content:space-between"><button class="btn danger" id="pDel" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="pSave">Guardar pedido</button></div>`,
   (d, close) => {
-    const fichaOpts = sel => `<option value="">Vela personalizada</option>` + S.fichas.map(f=>`<option value="${esc(f.id)}" ${f.id===sel?"selected":""}>${esc(f.nombre)} · ${$$(fichaCalc(f).precio)}</option>`).join("");
+    const fichaOpts = (sel, comboSel) => `<option value="">Vela personalizada</option>` + S.fichas.map(f=>`<option value="${esc(f.id)}" ${f.id===sel&&!comboSel?"selected":""}>${esc(f.nombre)} · ${$$(fichaCalc(f).precio)}</option>`).join("")
+      + (S.combos.length ? `<optgroup label="Combos">${S.combos.map(c=>`<option value="combo:${esc(c.id)}" ${c.id===comboSel?"selected":""}>${esc(c.nombre)} · ${$$(comboCalc(c).precio)}</option>`).join("")}</optgroup>` : "");
     const drawItems = () => {
       $("#pItems",d).innerHTML = p.items.map((it,i)=>`<div class="line item">
-        <label class="it-sel" for="iF${i}">Vela<select id="iF${i}" data-i="${i}" data-k="fichaId">${fichaOpts(it.fichaId)}</select></label>
+        <label class="it-sel" for="iF${i}">Vela<select id="iF${i}" data-i="${i}" data-k="fichaId">${fichaOpts(it.fichaId, it.comboId)}</select></label>
         <label for="iC${i}">Cant.<input id="iC${i}" type="number" min="0" data-i="${i}" data-k="cant" value="${N(it.cant)}"></label>
         <label for="iP${i}">Precio c/u<input id="iP${i}" type="number" min="0" step="500" data-i="${i}" data-k="precio" value="${N(it.precio)}"></label>
         <button class="x" data-di="${i}" aria-label="Quitar vela">×</button>
-        ${!it.fichaId ? `<label style="grid-column:1/-1" for="iN${i}">Nombre<input id="iN${i}" data-i="${i}" data-k="nombre" value="${esc(it.nombre)}"></label>
+        ${!it.fichaId && !it.comboId ? `<label style="grid-column:1/-1" for="iN${i}">Nombre<input id="iN${i}" data-i="${i}" data-k="nombre" value="${esc(it.nombre)}"></label>
         <label for="iCo${i}">Insumos c/u<input id="iCo${i}" type="number" min="0" data-i="${i}" data-k="costo" value="${N(it.costo)}"></label>
         <label for="iM${i}">Mano de obra c/u<input id="iM${i}" type="number" min="0" data-i="${i}" data-k="mo" value="${N(it.mo)}"></label>` : ""}
       </div>`).join("") || `<p class="hint">Sin velas todavía.</p>`;
       $("#pItems",d).querySelectorAll("[data-k]").forEach(el => {
         el.oninput = el.onchange = () => {
           const i = +el.dataset.i, k = el.dataset.k;
-          if(k==="fichaId"){ const f = S.fichas.find(x=>x.id===el.value); p.items[i] = f ? itemFromFicha(f, p.items[i].cant) : { fichaId:"", nombre:"Vela personalizada", cant:p.items[i].cant, precio:p.items[i].precio, costo:0, mo:0 }; drawItems(); return; }
+          if(k==="fichaId"){
+            const v = el.value, cant = p.items[i].cant;
+            if(v.startsWith("combo:")){ const c = S.combos.find(x=>x.id===v.slice(6)); if(c){ p.items[i] = itemFromCombo(c, cant); drawItems(); return; } }
+            const f = S.fichas.find(x=>x.id===v); p.items[i] = f ? itemFromFicha(f, cant) : { fichaId:"", nombre:"Vela personalizada", cant, precio:p.items[i].precio, costo:0, mo:0 }; drawItems(); return; }
           p.items[i][k] = k==="nombre" ? el.value : N(el.value); sum();
         };
       });
@@ -481,15 +570,31 @@ function editPedido(p0){
       $("#pAbo",d).querySelectorAll("[data-da]").forEach(b => b.onclick = () => { p.abonos.splice(+b.dataset.da,1); drawAbonos(); });
       sum();
     };
+    const domicilio = (cambioModo) => {
+      const modo = $("#pEM",d).value, ec = $("#pEC",d), ev = $("#pEnv",d);
+      p.envioModo = modo;
+      ec.disabled = modo === "sin"; ev.disabled = modo !== "parcial";
+      if(modo === "sin"){ ev.value = 0; ec.value = 0; }
+      else if(modo === "cliente") ev.value = N(ec.value);
+      else if(modo === "yo") ev.value = 0;
+      else if(cambioModo && modo === "parcial" && !N(ev.value)) ev.value = Math.max(0, N(ec.value) - 10000);
+      if(cambioModo && modo !== "sin" && !N(ec.value)) { ec.value = N(S.cfg.domicilioCosto); if(modo === "cliente") ev.value = ec.value; }
+      p.envio = N(ev.value); p.envioCosto = N(ec.value);
+      const velas = pedidoCalc(p).velas;
+      const pol = velas >= 100 ? "envío sin costo" : velas >= 50 ? "bono de $15.000" : velas >= 30 ? "bono de $10.000" : "";
+      $("#pEH",d).textContent = (pol ? `Con ${velas} velas, tu política da ${pol}. ` : "") + (modo === "yo" || modo === "parcial" ? `Tú pones ${$$(Math.max(0, p.envioCosto - p.envio))}, que se descuenta de la ganancia.` : modo === "cliente" ? "El cliente paga el domicilio completo; no afecta tu ganancia." : "");
+    };
     const sum = () => {
-      p.envio = N($("#pEnv",d).value);
+      domicilio(false);
       const c = pedidoCalc(p);
-      $("#pSum",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas</dt><dd class="num">${$$(c.ventas)}</dd><dt>Envío</dt><dd class="num">${$$(c.envio)}</dd>
+      $("#pIns",d).innerHTML = tablaInsumos(p.items);
+      $("#pSum",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas</dt><dd class="num">${$$(c.ventas)}</dd><dt>Domicilio cobrado</dt><dd class="num">${$$(c.envio)}</dd>
       <dt class="total">Total</dt><dd class="total num">${$$(c.total)}</dd><dt>Pagado</dt><dd class="num">${$$(c.pagado)}</dd>
       <dt class="total">Saldo</dt><dd class="total num" style="color:${c.saldo>0?"var(--ember)":"var(--ok)"}">${$$(c.saldo)}</dd>
-      <dt>Tu mano de obra</dt><dd class="num">${$$(c.mo)}</dd><dt>Ganancia empresa</dt><dd class="num">${$$(c.ganancia)}</dd></dl>`;
+      <dt>Tu mano de obra</dt><dd class="num">${$$(c.mo)}</dd>${c.envioAsumido?`<dt>Domicilio que asumes</dt><dd class="num" style="color:var(--bad)">−${$$(c.envioAsumido)}</dd>`:""}<dt>Ganancia empresa</dt><dd class="num" style="color:${c.ganancia<0?"var(--bad)":"inherit"}">${$$(c.ganancia)}</dd></dl>`;
     };
-    $("#pEnv",d).oninput = sum;
+    $("#pEnv",d).oninput = sum; $("#pEC",d).oninput = sum;
+    $("#pEM",d).onchange = () => { domicilio(true); sum(); };
     $("#pAddI",d).onclick = () => { p.items.push(S.fichas[0] ? itemFromFicha(S.fichas[0],1) : {fichaId:"",nombre:"Vela personalizada",cant:1,precio:0,costo:0,mo:0}); drawItems(); };
     $("#pAddA",d).onclick = () => { p.abonos.push({fecha:ymd(today()), monto:0}); drawAbonos(); };
     $("#pSave",d).onclick = async () => {
@@ -505,6 +610,7 @@ function editPedido(p0){
   });
 }
 function itemFromFicha(f, cant){ const c = fichaCalc(f); return { fichaId:f.id, nombre:f.nombre, cant:N(cant)||1, precio:c.precio, costo:c.insumos, mo:c.mo }; }
+function itemFromCombo(cb, cant){ const c = comboCalc(cb); return { comboId:cb.id, fichaId:"", nombre:cb.nombre, cant:N(cant)||1, velas:c.velas, precio:c.precio, costo:c.insumos, mo:c.mo }; }
 
 function editMolde(m0){
   const isNew = !m0;
@@ -540,20 +646,21 @@ function editFicha(f0){
     {nombre:"Cera de soya", compraCant:1000, compraPrecio:0, uso:0, unidad:"g"},
     {nombre:"Esencia", tipo:"esencia", compraCant:120, compraPrecio:0, uso:0, unidad:"g"},
     {nombre:"Colorante", tipo:"colorante", compraCant:10, compraPrecio:0, uso:0, unidad:"gotas"},
-    {nombre:"Pabilo", compraCant:1, compraPrecio:0, uso:1, unidad:"und"},
+    {nombre:"Pabilo", tipo:"pabilo", talla:"M", compraCant:100, compraPrecio:0, uso:0, unidad:"cm"},
     {nombre:"Pegatina", compraCant:1, compraPrecio:0, uso:1, unidad:"und"},
     {nombre:"Bolsa", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}], manoObra:0, gananciaPct:30, precioFijo:0 }));
   f.insumos.forEach(i => {
     const t = insTipo(i); i.tipo = t;
     if(t === "esencia"){ if(!ENVASES_ESENCIA.includes(N(i.compraCant))) i.compraCant = 120; i.unidad = "g"; }
     if(t === "colorante"){ if(!FRASCOS_COLORANTE.includes(N(i.compraCant))) i.compraCant = 10; i.unidad = "gotas"; }
+    if(t === "pabilo"){ if(!TALLAS.includes(i.talla)){ const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId); const sug = mo ? (mo.pabiloFijo || pabilo(mo.diametro)) : "M"; i.talla = TALLAS.includes(sug) ? sug : "M"; } if(i.unidad !== "cm"){ i.uso = 0; } i.unidad = "cm"; i.compraCant = 100; }
   });
   drawer(isNew ? "Nueva ficha" : "Ficha de costeo", `
     <div class="grid"><label for="fN">Vela<input id="fN" value="${esc(f.nombre)}" placeholder="Ej. Calabaza Halloween"></label>
     <label for="fM">Molde<select id="fM"><option value="">— Sin molde —</option>${S.moldes.map(m=>`<option value="${esc(m.id)}" ${m.id===f.moldeId?"selected":""}>${esc(m.nombre)}</option>`).join("")}</select></label></div>
     <div><h3>Insumos por vela</h3><p class="hint" style="margin:0 0 8px">Pon cuánto trae lo que compras, cuánto pagaste y cuánto gasta una vela. Ej. cera: compré 1000 g por $25.000, uso 180 g. La esencia la eliges por envase y la pones en gramos; el colorante, por frasco y en gotas.</p>
     <div class="lines" id="fIns"></div><div class="line" id="fMol" style="margin-top:8px"></div>
-    <div class="row" style="margin-top:8px"><button class="btn small" id="fAdd">+ Agregar insumo</button><button class="btn small" id="fAddE">+ Esencia</button><button class="btn small" id="fAddC">+ Colorante</button></div></div>
+    <div class="row" style="margin-top:8px"><button class="btn small" id="fAdd">+ Agregar insumo</button><button class="btn small" id="fAddE">+ Esencia</button><button class="btn small" id="fAddC">+ Colorante</button><button class="btn small" id="fAddP">+ Pabilo</button></div></div>
     <div class="grid"><label for="fMO">Tu mano de obra por vela<input id="fMO" type="number" min="0" step="100" value="${N(f.manoObra)}"></label>
     <label for="fG">Ganancia empresa (%)<input id="fG" type="number" min="0" step="1" value="${N(f.gananciaPct)}"></label>
     <label for="fP">Precio fijo (opcional)<input id="fP" type="number" min="0" step="500" value="${N(f.precioFijo)||""}" placeholder="Usar el sugerido"></label></div>
@@ -566,7 +673,15 @@ function editFicha(f0){
         const compra = t === "esencia" ? `<label for="q${k}">Envase<select id="q${k}" data-k="${k}" data-f="compraCant">${ENVASES_ESENCIA.map(v=>`<option value="${v}" ${N(i.compraCant)===v?"selected":""}>${v===1000?"1 litro":v+" ml"}</option>`).join("")}</select></label>`
           : t === "colorante" ? `<label for="q${k}">Frasco<select id="q${k}" data-k="${k}" data-f="compraCant">${FRASCOS_COLORANTE.map(v=>`<option value="${v}" ${N(i.compraCant)===v?"selected":""}>${v} ml</option>`).join("")}</select></label>`
           : `<label for="q${k}">Compré<input id="q${k}" type="number" min="0" data-k="${k}" data-f="compraCant" value="${N(i.compraCant)}"></label>`;
-        const uLbl = t === "esencia" ? "Uso (g)" : t === "colorante" ? "Uso (gotas)" : `Uso (${esc(i.unidad||"und")})`;
+        const uLbl = t === "esencia" ? "Uso (g)" : t === "colorante" ? "Uso (gotas)" : t === "pabilo" ? "Uso (cm)" : `Uso (${esc(i.unidad||"und")})`;
+        if(t === "pabilo") return `<div class="line ins">
+        <label class="ins-name" for="n${k}">Insumo<input id="n${k}" data-k="${k}" data-f="nombre" value="${esc(i.nombre)}"></label>
+        <label for="q${k}">Tamaño<select id="q${k}" data-k="${k}" data-f="talla">${TALLAS.map(v=>`<option value="${v}" ${i.talla===v?"selected":""}>${v}</option>`).join("")}</select></label>
+        <label>Metro<input value="${$$(pabPrecioMetro(i.talla))}" disabled id="pm${k}"></label>
+        <label for="u${k}">Uso (cm)<input id="u${k}" type="number" min="0" step="0.5" data-k="${k}" data-f="uso" value="${N(i.uso)}"></label>
+        <div class="cost" id="c${k}">${$$(insCost(i))}</div>
+        <button class="x" data-dk="${k}" aria-label="Quitar insumo">×</button>
+        <p class="hint" style="grid-column:1/-1;margin:0">El precio del metro por tamaño se cambia en Costeo → Conversiones.</p></div>`;
         return `<div class="line ins">
         <label class="ins-name" for="n${k}">Insumo<input id="n${k}" data-k="${k}" data-f="nombre" value="${esc(i.nombre)}"></label>
         ${compra}
@@ -575,7 +690,7 @@ function editFicha(f0){
         <div class="cost" id="c${k}">${$$(insCost(i))}</div>
         <button class="x" data-dk="${k}" aria-label="Quitar insumo">×</button>
         ${t !== "general" ? `<p class="hint" id="r${k}" style="grid-column:1/-1;margin:0">${rindeTxt(i)}</p>` : ""}</div>`; }).join("");
-      $("#fIns",d).querySelectorAll("[data-f]").forEach(el => el.oninput = el.onchange = () => { const i = f.insumos[+el.dataset.k]; i[el.dataset.f] = el.dataset.f==="nombre" ? el.value : N(el.value); $("#c"+el.dataset.k,d).textContent = $$(insCost(i)); const r = $("#r"+el.dataset.k,d); if(r) r.textContent = rindeTxt(i); sum(); });
+      $("#fIns",d).querySelectorAll("[data-f]").forEach(el => el.oninput = el.onchange = () => { const i = f.insumos[+el.dataset.k]; i[el.dataset.f] = (el.dataset.f==="nombre" || el.dataset.f==="talla") ? el.value : N(el.value); $("#c"+el.dataset.k,d).textContent = $$(insCost(i)); const pm = $("#pm"+el.dataset.k,d); if(pm) pm.value = $$(pabPrecioMetro(i.talla)); const r = $("#r"+el.dataset.k,d); if(r) r.textContent = rindeTxt(i); sum(); });
       drawMolde();
       $("#fIns",d).querySelectorAll("[data-dk]").forEach(b => b.onclick = () => { f.insumos.splice(+b.dataset.dk,1); draw(); });
       sum();
@@ -601,6 +716,7 @@ function editFicha(f0){
     ["fMO","fG","fP"].forEach(id => $("#"+id,d).oninput = sum);
     $("#fAdd",d).onclick = () => { f.insumos.push({nombre:"", tipo:"general", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}); draw(); };
     $("#fAddE",d).onclick = () => { f.insumos.push({nombre:"Esencia", tipo:"esencia", compraCant:120, compraPrecio:0, uso:0, unidad:"g"}); draw(); };
+    $("#fAddP",d).onclick = () => { const mo = f.moldeId && S.moldes.find(x=>x.id===f.moldeId); const sug = mo ? (mo.pabiloFijo || pabilo(mo.diametro)) : "M"; f.insumos.push({nombre:"Pabilo", tipo:"pabilo", talla: TALLAS.includes(sug)?sug:"M", compraCant:100, compraPrecio:0, uso:0, unidad:"cm"}); draw(); };
     $("#fAddC",d).onclick = () => { f.insumos.push({nombre:"Colorante", tipo:"colorante", compraCant:10, compraPrecio:0, uso:0, unidad:"gotas"}); draw(); };
     $("#fM",d).onchange = () => { f.moldeId = $("#fM",d).value; drawMolde(); sum(); };
     $("#fSave",d).onclick = async () => {
@@ -614,17 +730,121 @@ function editFicha(f0){
   });
 }
 
+function editCombo(c0){
+  const isNew = !c0;
+  if(!S.fichas.length){ toast("Primero crea fichas de costeo"); return; }
+  const cb = JSON.parse(JSON.stringify(c0 || { id:uid(), nombre:"", items:[{ fichaId:S.fichas[0].id, cant:2 }], precio:0 }));
+  drawer(isNew ? "Nuevo combo" : "Combo", `
+    <label for="cbN">Nombre del combo<input id="cbN" value="${esc(cb.nombre)}" placeholder="Ej. Combo Navidad x3"></label>
+    <div><h3>Velas del combo</h3><div class="lines" id="cbI"></div><button class="btn small" id="cbA" style="margin-top:8px">+ Agregar vela</button></div>
+    <label for="cbP">Precio del combo<input id="cbP" type="number" min="0" step="500" value="${N(cb.precio)||""}" placeholder="Precio normal"></label>
+    <div class="grid" id="cbQ"></div>
+    <div class="panel" id="cbS"></div>
+    <div class="row" style="justify-content:space-between"><button class="btn danger" id="cbD" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="cbG">Guardar combo</button></div>`,
+  (d, close) => {
+    const draw = () => {
+      $("#cbI",d).innerHTML = cb.items.map((it,i)=>`<div class="line calc">
+        <label for="cbF${i}">Vela<select id="cbF${i}" data-i="${i}" data-k="fichaId">${S.fichas.map(f=>`<option value="${esc(f.id)}" ${f.id===it.fichaId?"selected":""}>${esc(f.nombre)} · ${$$(fichaCalc(f).precio)}</option>`).join("")}</select></label>
+        <label for="cbC${i}">Cant.<input id="cbC${i}" type="number" min="1" data-i="${i}" data-k="cant" value="${N(it.cant)}"></label>
+        <button class="x" data-di="${i}" aria-label="Quitar vela">×</button></div>`).join("");
+      $("#cbI",d).querySelectorAll("[data-k]").forEach(el => el.oninput = el.onchange = () => { cb.items[+el.dataset.i][el.dataset.k] = el.dataset.k==="cant" ? N(el.value) : el.value; sum(); });
+      $("#cbI",d).querySelectorAll("[data-di]").forEach(b => b.onclick = () => { cb.items.splice(+b.dataset.di,1); draw(); });
+      sum();
+    };
+    const sum = () => {
+      cb.precio = N($("#cbP",d).value);
+      const c = comboCalc(cb);
+      const r500 = v => Math.ceil(v/500)*500;
+      const opciones = [0.05, 0.10, 0.15].map(p => r500(c.normal*(1-p)));
+      const qh = c.normal ? opciones.map((v,i)=>`<button class="btn small" data-pq="${v}">${[5,10,15][i]}% menos · ${$$(v)}</button>`).join("") : "";
+      if($("#cbQ",d).dataset.h !== qh){ $("#cbQ",d).dataset.h = qh; $("#cbQ",d).innerHTML = qh; $("#cbQ",d).querySelectorAll("[data-pq]").forEach(b => b.onclick = () => { $("#cbP",d).value = b.dataset.pq; sum(); }); }
+      const cls = c.ganancia < 0 ? "var(--bad)" : c.conserva < .6 ? "var(--warn)" : "var(--ok)";
+      $("#cbS",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas a precio normal</dt><dd class="num">${$$(c.normal)}</dd>
+      <dt class="total">Precio del combo</dt><dd class="total num">${$$(c.precio)}</dd>
+      <dt>Descuento para el cliente</dt><dd class="num">${$$(c.normal - c.precio)} (${Math.round(c.descuento*100)}%)</dd>
+      <dt>Insumos y molde</dt><dd class="num">${$$(c.insumos)}</dd><dt>Tu mano de obra</dt><dd class="num">${$$(c.mo)}</dd>
+      <dt class="total">Ganancia empresa</dt><dd class="total num" style="color:${cls}">${$$(c.ganancia)}</dd>
+      <dt>Ganancia si las vendieras sueltas</dt><dd class="num">${$$(c.gananciaNormal)}</dd>
+      <dt>Precio mínimo sin perder</dt><dd class="num">${$$(c.minimo)}</dd></dl>
+      <p class="hint" style="margin:10px 0 0;color:${cls}">${c.ganancia < 0 ? "Con este precio pierdes plata: no alcanza para insumos y mano de obra." : c.gananciaNormal > 0 ? `Conservas el ${Math.round(c.conserva*100)}% de la ganancia que tendrías vendiéndolas sueltas.${c.conserva < .6 ? " Es un descuento fuerte; úsalo como oferta puntual." : ""}` : ""}</p>`;
+    };
+    $("#cbP",d).oninput = sum;
+    $("#cbA",d).onclick = () => { cb.items.push({ fichaId:S.fichas[0].id, cant:1 }); draw(); };
+    $("#cbG",d).onclick = async () => {
+      cb.nombre = $("#cbN",d).value.trim();
+      if(!cb.nombre){ $("#cbN",d).focus(); toast("Ponle nombre al combo"); return; }
+      cb.items = cb.items.filter(i=>N(i.cant)>0);
+      if(!cb.items.length){ toast("Agrega al menos una vela"); return; }
+      cb.precio = N($("#cbP",d).value) || comboCalc(cb).normal;
+      const { id, ...body } = cb;
+      if(await saveDoc("combos", id, body)){ close(); toast("Combo guardado"); }
+    };
+    $("#cbD",d).onclick = e => confirmDelete(e.target, async () => { if(await delDoc("combos", cb.id)){ close(); toast("Combo borrado"); } });
+    draw();
+  });
+}
+
+// ---------- compras: precios por proveedor ----------
+const UNIDADES = { g:["g",1], kg:["g",1000], ml:["ml",1], l:["ml",1000], cm:["cm",1], m:["cm",100], und:["und",1] };
+const BASE_TXT = { g:["1 kg",1000], ml:["1 litro",1000], cm:["1 metro",100], und:["1 unidad",1] };
+function precioUnit(r){ const u = UNIDADES[r.unidad] || ["und",1]; const base = N(r.cantidad) * u[1]; return base > 0 ? { base:u[0], porBase: N(r.precio)/base } : null; }
+function rCompras(m){
+  const grupos = {};
+  S.precios.forEach(r => { const pu = precioUnit(r); if(!pu) return; const k = (r.insumo||"").trim().toLowerCase() + "|" + pu.base; (grupos[k] ||= { insumo:(r.insumo||"").trim(), base:pu.base, filas:[] }).filas.push({ ...r, pu:pu.porBase }); });
+  const lista = Object.values(grupos).sort((a,b)=>a.insumo.localeCompare(b.insumo));
+  m.innerHTML = `
+  <div class="sec-head"><div><h2>Compras</h2><p class="lede">Anota lo que cuesta cada insumo en cada proveedor y la presentación en que lo venden. Te comparo el precio por kilo, litro, metro o unidad para que sepas dónde comprar más barato.</p></div>
+  <button class="btn primary" id="nuevoPr">+ Nuevo precio</button></div>
+  <div class="stack">${lista.length ? lista.map(g => {
+    g.filas.sort((a,b)=>a.pu-b.pu);
+    const min = g.filas[0].pu, [txt, mult] = BASE_TXT[g.base] || ["1 unidad",1];
+    return `<div class="panel"><div class="row" style="justify-content:space-between;margin-bottom:6px"><h3 style="margin:0">${esc(g.insumo)}</h3><span class="hint">Precio por ${txt}</span></div>
+    <div class="tbl-wrap"><table><thead><tr><th>Proveedor</th><th>Presentación</th><th class="r">Precio</th><th class="r">Por ${txt}</th><th></th></tr></thead><tbody>
+    ${g.filas.map((r,i)=>`<tr class="click" data-prid="${esc(r.id)}"><td><b>${esc(r.proveedor||"—")}</b>${r.notas?`<div class="hint">${esc(r.notas)}</div>`:""}</td><td class="num">${N(r.cantidad)} ${esc(r.unidad)}</td><td class="r num">${$$(r.precio)}</td><td class="r num"><b>${$$(r.pu*mult)}</b></td><td>${i===0?`<span class="pill ok">Más barato</span>`:`<span class="pill">+${Math.round((r.pu/min-1)*100)}%</span>`}</td></tr>`).join("")}
+    </tbody></table></div>${g.filas.length > 1 ? `<p class="hint" style="margin:8px 0 0">Comprando en ${esc(g.filas[0].proveedor||"el más barato")} ahorras ${$$((g.filas[g.filas.length-1].pu - min)*mult)} por cada ${txt} frente al más caro.</p>` : `<p class="hint" style="margin:8px 0 0">Agrega otro proveedor de ${esc(g.insumo)} para comparar.</p>`}</div>`;
+  }).join("") : `<div class="empty"><strong>Aún no hay precios</strong>Anota, por ejemplo, la cera de soya en dos proveedores distintos y te digo cuál sale más barata por kilo.</div>`}</div>`;
+  $("#nuevoPr").onclick = () => editPrecio(null);
+  m.querySelectorAll("[data-prid]").forEach(r => r.onclick = () => editPrecio(S.precios.find(x=>x.id===r.dataset.prid)));
+}
+function editPrecio(r0){
+  const isNew = !r0;
+  const r = { ...(r0 || { id:uid(), insumo:"", proveedor:"", cantidad:"", unidad:"g", precio:"", fecha:ymd(today()), notas:"" }) };
+  const insumos = [...new Set([...S.precios.map(x=>x.insumo), ...S.fichas.flatMap(f=>(f.insumos||[]).map(i=>i.nombre))].filter(Boolean))];
+  const provs = [...new Set(S.precios.map(x=>x.proveedor).filter(Boolean))];
+  drawer(isNew ? "Nuevo precio" : "Precio", `
+    <label for="prI">Insumo<input id="prI" list="dlI" value="${esc(r.insumo)}" placeholder="Ej. Cera de soya"><datalist id="dlI">${insumos.map(v=>`<option value="${esc(v)}">`).join("")}</datalist></label>
+    <label for="prP">Proveedor<input id="prP" list="dlP" value="${esc(r.proveedor)}" placeholder="Ej. Tienda Velas Bogotá"><datalist id="dlP">${provs.map(v=>`<option value="${esc(v)}">`).join("")}</datalist></label>
+    <div class="grid"><label for="prC">Presentación<input id="prC" type="number" min="0" step="any" value="${esc(r.cantidad)}" placeholder="Ej. 1"></label>
+    <label for="prU">Unidad<select id="prU">${Object.keys(UNIDADES).map(u=>`<option value="${u}" ${r.unidad===u?"selected":""}>${{g:"gramos",kg:"kilos",ml:"mililitros",l:"litros",cm:"centímetros",m:"metros",und:"unidades"}[u]}</option>`).join("")}</select></label>
+    <label for="prV">Precio ($)<input id="prV" type="number" min="0" step="100" value="${esc(r.precio)}"></label></div>
+    <div class="grid"><label for="prF">Fecha del precio<input id="prF" type="date" value="${esc(r.fecha)}"></label></div>
+    <label for="prN">Notas<input id="prN" value="${esc(r.notas)}" placeholder="Ej. incluye envío, mínimo 5 kg"></label>
+    <div class="panel" id="prS"></div>
+    <div class="row" style="justify-content:space-between"><button class="btn danger" id="prD" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="prG">Guardar precio</button></div>`,
+  (d, close) => {
+    const sum = () => { const tmp = { cantidad:$("#prC",d).value, unidad:$("#prU",d).value, precio:$("#prV",d).value }; const pu = precioUnit(tmp); const [txt, mult] = pu ? BASE_TXT[pu.base] : ["",1]; $("#prS",d).innerHTML = pu && N(tmp.precio) ? `<dl class="kv"><dt>Precio por ${txt}</dt><dd class="num"><b>${$$(pu.porBase*mult)}</b></dd></dl>` : `<p class="hint" style="margin:0">Escribe presentación y precio para ver el precio por kilo, litro, metro o unidad.</p>`; };
+    ["prC","prU","prV"].forEach(id => $("#"+id,d).oninput = $("#"+id,d).onchange = sum); sum();
+    $("#prG",d).onclick = async () => {
+      const body = { insumo:$("#prI",d).value.trim(), proveedor:$("#prP",d).value.trim(), cantidad:N($("#prC",d).value), unidad:$("#prU",d).value, precio:N($("#prV",d).value), fecha:$("#prF",d).value, notas:$("#prN",d).value.trim() };
+      if(!body.insumo){ $("#prI",d).focus(); toast("Escribe el insumo"); return; }
+      if(!body.cantidad || !body.precio){ toast("Pon la presentación y el precio"); return; }
+      if(await saveDoc("precios", r.id, body)){ close(); toast("Precio guardado"); }
+    };
+    $("#prD",d).onclick = e => confirmDelete(e.target, async () => { if(await delDoc("precios", r.id)){ close(); toast("Precio borrado"); } });
+  });
+}
+
 // ---------- datos (guardados en este dispositivo) ----------
 const KEY = "magma-mecha-datos-v1";
-const store = { pedidos:{}, moldes:{}, fichas:{}, config:{}, meta:{} };
+const store = { pedidos:{}, moldes:{}, fichas:{}, combos:{}, precios:{}, config:{}, meta:{} };
 function loadStore(){
-  try { const raw = localStorage.getItem(KEY); if(raw){ const d = JSON.parse(raw); ["pedidos","moldes","fichas","config","meta"].forEach(k => store[k] = d[k] || {}); } }
+  try { const raw = localStorage.getItem(KEY); if(raw){ const d = JSON.parse(raw); ["pedidos","moldes","fichas","combos","precios","config","meta"].forEach(k => store[k] = d[k] || {}); } }
   catch(e){ S.storageError = true; }
   syncState();
 }
 function syncState(){
   const list = o => Object.entries(o).map(([id,b]) => ({ id, ...b }));
-  S.pedidos = list(store.pedidos); S.moldes = list(store.moldes); S.fichas = list(store.fichas);
+  S.pedidos = list(store.pedidos); S.moldes = list(store.moldes); S.fichas = list(store.fichas); S.combos = list(store.combos); S.precios = list(store.precios);
   S.cfg = { ...DEFAULT_CFG, ...(store.config.ajustes || {}) };
 }
 function persist(){
@@ -658,7 +878,7 @@ const FB_CONFIG = {
   messagingSenderId: "609538390838",
   appId: "1:609538390838:web:ab35255f55b7bbe4ca5197"
 };
-const COLS = ["pedidos","moldes","fichas","config"];
+const COLS = ["pedidos","moldes","fichas","combos","precios","config"];
 const SYNC = { ok:false, user:null, fs:null, auth:null, unsubs:[], estado:"local", error:"" };
 function initCloud(){
   if(!window.firebase){ SYNC.estado = "sin-sdk"; paintSync(); return; }
@@ -764,7 +984,7 @@ function abrirSync(){
 function diasSinRespaldo(){ const t = store.meta.ultimoRespaldo; return t ? Math.floor((Date.now() - new Date(t)) / 86400000) : null; }
 function hayDatos(){ return S.pedidos.length + S.moldes.length + S.fichas.length > 0; }
 function descargarRespaldo(){
-  const data = { app:"Magma & Mecha", version:1, fecha:new Date().toISOString(), pedidos:store.pedidos, moldes:store.moldes, fichas:store.fichas, config:store.config };
+  const data = { app:"Magma & Mecha", version:1, fecha:new Date().toISOString(), pedidos:store.pedidos, moldes:store.moldes, fichas:store.fichas, combos:store.combos, precios:store.precios, config:store.config };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type:"application/json" });
   const name = `magma-mecha-respaldo-${ymd(new Date())}.json`;
   const url = URL.createObjectURL(blob);
@@ -780,7 +1000,7 @@ function restaurarRespaldo(file, done){
       const d = JSON.parse(r.result);
       if(d.app !== "Magma & Mecha" || !d.pedidos) throw new Error("formato");
       const antes = JSON.stringify(store);
-      ["pedidos","moldes","fichas","config"].forEach(k => store[k] = d[k] || {});
+      ["pedidos","moldes","fichas","combos","precios","config"].forEach(k => store[k] = d[k] || {});
       if(!persist()){ Object.assign(store, JSON.parse(antes)); return; }
       syncState(); render(); done && done();
       reemplazarNube().catch(()=>toast("Restaurado en este equipo; no se pudo actualizar la nube."));
