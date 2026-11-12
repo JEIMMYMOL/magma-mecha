@@ -189,7 +189,7 @@ const MESES_L = ["enero","febrero","marzo","abril","mayo","junio","julio","agost
 const fmtD = s => { const d = parseD(s); return d ? `${d.getDate()} ${MESES[d.getMonth()]} ${d.getFullYear()}` : "—"; };
 const DIAS = ["dom","lun","mar","mié","jue","vie","sáb"];
 
-const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50, pabPrecioS:1200, pabPrecioM:1500, pabPrecioL:1800, domicilioCosto:21000, descDesde:12, descPct:5 };
+const DEFAULT_CFG = { secado:4, jornada:8, noche:false, empaque:1, aviso:3, pabS:5, pabM:7, pabL:9, densEsencia:0.95, gotasMl:20, usosMolde:50, pabPrecioS:1200, pabPrecioM:1500, pabPrecioL:1800, domicilioCosto:21000, descDesde:12, descPct:5, kitTarjeta:300, kitCaja:1000, kitEnergia:1000, kitMO:7000, kitGanancia:60 };
 const S = { tab:"pedidos", filtro:"activos", soloEntregados:false, pedidos:[], moldes:[], fichas:[], combos:[], precios:[], recetas:[], inventario:[], clientes:[], cfg:{...DEFAULT_CFG}, loaded:{p:false,m:false,f:false,c:false}, db:null, offline:false, calc:{lines:[], inicio:ymd(today())} };
 
 // ---------- cálculos ----------
@@ -221,8 +221,9 @@ function insUnidad(i){ const t = insTipo(i); return t === "esencia" ? "g" : t ==
 // insumos que gasta una lista de líneas {fichaId|comboId, cant}
 function insumosPara(lineas){
   const acc = {};
-  const sumar = (f, cant) => {
+  const sumar = (f, cant, enKit) => {
     (f.insumos||[]).forEach(i => {
+      if(enKit && esEmpaque(i)) return;
       const t = insTipo(i), u = insUnidad(i);
       const nombre = t === "pabilo" ? `Pabilo ${i.talla||"M"}` : (i.nombre || "Insumo");
       const k = (nombre + "|" + u).toLowerCase();
@@ -234,7 +235,8 @@ function insumosPara(lineas){
   };
   lineas.forEach(l => {
     const cant = N(l.cant); if(!cant) return;
-    if(l.comboId){ const c = S.combos.find(x=>x.id===l.comboId); (c?.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(f) sumar(f, cant*N(ci.cant)); }); }
+    if(l.comboId){ const c = S.combos.find(x=>x.id===l.comboId); if(!c) return; (c.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(f) sumar(f, cant*N(ci.cant), true); });
+      const fx = kitFijos(); [["Caja del kit", fx.caja], ["Tarjeta del kit", fx.tarjeta]].forEach(([nombre, precio]) => { const r = acc[nombre.toLowerCase()] ||= { nombre, unidad:"und", tipo:"general", cantidad:0, costo:0 }; r.cantidad += cant; r.costo += precio * cant; }); }
     else { const f = S.fichas.find(x=>x.id===l.fichaId); if(f) sumar(f, cant); }
   });
   return Object.values(acc).sort((a,b)=>a.nombre.localeCompare(b.nombre));
@@ -256,12 +258,23 @@ function tablaInsumos(lineas){
   <tfoot><tr><td>Total insumos</td><td></td><td class="r num">${$$(total)}</td></tr></tfoot></table></div>`;
 }
 // combos
+// En un kit cada vela aporta solo cera, esencia, colorante, pabilo, molde, etc.;
+// el empaque individual (caja o bolsa) no se cuenta porque el kit lleva una sola caja.
+function esEmpaque(i){ return /\b(caja|bolsa|empaque)\b/i.test(i.nombre||""); }
+function fichaVelaKit(f){ return (f.insumos||[]).reduce((a,i)=> a + (esEmpaque(i) ? 0 : insCost(i)), 0) + moldeCost(f); }
+function kitFijos(){ const c = S.cfg; return { tarjeta:N(c.kitTarjeta), caja:N(c.kitCaja), energia:N(c.kitEnergia) }; }
 function comboCalc(c){
-  let normal=0, insumos=0, mo=0, velas=0;
-  (c.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(!f) return; const fc = fichaCalc(f), q = N(ci.cant); velas += q; normal += fc.precio*q; insumos += fc.insumos*q; mo += fc.mo*q; });
-  const precio = N(c.precio) || normal;
-  const ganancia = precio - insumos - mo, gananciaNormal = normal - insumos - mo;
-  return { velas, normal, insumos, mo, precio, ganancia, gananciaNormal, minimo: insumos + mo,
+  let normal=0, insumosSueltas=0, moSueltas=0, velas=0, velasInsumos=0;
+  (c.items||[]).forEach(ci => { const f = S.fichas.find(x=>x.id===ci.fichaId); if(!f) return; const fc = fichaCalc(f), q = N(ci.cant); velas += q; normal += fc.precio*q; insumosSueltas += fc.insumos*q; moSueltas += fc.mo*q; velasInsumos += fichaVelaKit(f)*q; });
+  const fx = kitFijos(), fijos = velas ? fx.tarjeta + fx.caja + fx.energia : 0;
+  const insumos = velasInsumos + fijos;
+  const mo = velas ? N(S.cfg.kitMO) : 0;
+  const base = insumos + mo;
+  const gananciaPct = N(S.cfg.kitGanancia);
+  const sugerido = Math.ceil(base * (1 + gananciaPct/100) / 500) * 500;
+  const precio = N(c.precioFijo) > 0 ? N(c.precioFijo) : sugerido;
+  const ganancia = precio - insumos - mo, gananciaNormal = normal - insumosSueltas - moSueltas;
+  return { velas, normal, velasInsumos, fijos, fx, insumos, mo, base, gananciaPct, sugerido, precio, ganancia, gananciaNormal, minimo: base,
     descuento: normal > 0 ? 1 - precio/normal : 0, margen: precio > 0 ? ganancia/precio : 0,
     conserva: gananciaNormal > 0 ? ganancia/gananciaNormal : 0 };
 }
@@ -499,11 +512,11 @@ function rCosteo(m){
   <button class="btn primary" id="nuevaF">+ Nueva ficha</button></div>
   <div class="panel">${S.fichas.length ? `<div class="tbl-wrap"><table><thead><tr><th>Vela</th><th class="r">Insumos</th><th class="r">Mano de obra</th><th class="r">Ganancia</th><th class="r">Precio</th></tr></thead><tbody>
   ${S.fichas.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(f=>{ const c=fichaCalc(f); return `<tr class="click" data-fid="${esc(f.id)}"><td><b>${esc(f.nombre)}</b>${f.moldeId?`<div class="hint">${esc(S.moldes.find(x=>x.id===f.moldeId)?.nombre||"")}</div>`:""}</td><td class="r num">${$$(c.insumos)}</td><td class="r num">${$$(c.mo)}</td><td class="r num" style="color:${c.ganancia<0?"var(--bad)":"inherit"}">${$$(c.ganancia)}</td><td class="r num"><b>${$$(c.precio)}</b></td></tr>`}).join("")}
-  </tbody></table></div>` : `<div class="empty"><strong>Aún no hay fichas</strong>Crea una ficha por diseño de vela con sus insumos (cera, esencia, colorante, mica, pabilo, pegatina, bolsa).</div>`}</div>
-  <div class="sec-head" style="margin-top:26px"><div><h2>Combos</h2><p class="lede">Paquetes de varias velas a un precio especial. Te muestro cuánto descuento das y cuánta ganancia conservas, para que armes ofertas sin perder margen.</p></div>
+  </tbody></table></div>` : `<div class="empty"><strong>Aún no hay fichas</strong>Crea una ficha por diseño de vela con sus insumos (cera, esencia, colorante, mica, pabilo, pegatina, caja).</div>`}</div>
+  <div class="sec-head" style="margin-top:26px"><div><h2>Combos</h2><p class="lede">Kits de varias velas en una sola caja. Cada vela suma solo sus insumos (cera, esencia, colorante, pabilo, molde); el kit suma una caja, una tarjeta, energía y una mano de obra por todo el kit. Esos valores se cambian en Conversiones → Kits.</p></div>
   <button class="btn primary" id="nuevoC">+ Nuevo combo</button></div>
-  <div class="panel">${S.combos.length ? `<div class="tbl-wrap"><table><thead><tr><th>Combo</th><th class="r">Velas</th><th class="r">Precio normal</th><th class="r">Precio combo</th><th class="r">Descuento</th><th class="r">Ganancia</th></tr></thead><tbody>
-  ${S.combos.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(cb=>{ const c = comboCalc(cb); const cls = c.ganancia < 0 ? "bad" : c.conserva < .6 ? "warn" : "ok"; return `<tr class="click" data-cid="${esc(cb.id)}"><td><b>${esc(cb.nombre)}</b></td><td class="r num">${c.velas}</td><td class="r num">${$$(c.normal)}</td><td class="r num"><b>${$$(c.precio)}</b></td><td class="r num">${Math.round(c.descuento*100)}%</td><td class="r num"><span class="pill ${cls}">${$$(c.ganancia)}</span></td></tr>`}).join("")}
+  <div class="panel">${S.combos.length ? `<div class="tbl-wrap"><table><thead><tr><th>Combo</th><th class="r">Velas</th><th class="r">Sueltas</th><th class="r">Precio combo</th><th class="r">Descuento</th><th class="r">Ganancia</th></tr></thead><tbody>
+  ${S.combos.slice().sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||"")).map(cb=>{ const c = comboCalc(cb); const cls = c.ganancia < 0 ? "bad" : "ok"; return `<tr class="click" data-cid="${esc(cb.id)}"><td><b>${esc(cb.nombre)}</b></td><td class="r num">${c.velas}</td><td class="r num">${$$(c.normal)}</td><td class="r num"><b>${$$(c.precio)}</b></td><td class="r num">${Math.round(c.descuento*100)}%</td><td class="r num"><span class="pill ${cls}">${$$(c.ganancia)}</span></td></tr>`}).join("")}
   </tbody></table></div>` : `<div class="empty"><strong>Aún no hay combos</strong>${S.fichas.length ? "Crea uno juntando varias velas de tus fichas." : "Primero crea fichas de costeo; los combos se arman con ellas."}</div>`}</div>
   <div class="panel" style="margin-top:14px"><h3>¿Cuántos insumos necesito?</h3>
   ${S.fichas.length ? `<div class="grid"><label for="qnF">Vela o combo<select id="qnF">${S.fichas.map(f=>`<option value="${esc(f.id)}">${esc(f.nombre)}</option>`).join("")}${S.combos.length?`<optgroup label="Combos">${S.combos.map(c=>`<option value="combo:${esc(c.id)}">${esc(c.nombre)}</option>`).join("")}</optgroup>`:""}</select></label>
@@ -526,10 +539,19 @@ function rCosteo(m){
   <div class="grid">
     <label for="cvDD">Cuando el pedido tiene más de (velas)<input id="cvDD" type="number" step="1" min="0" value="${N(S.cfg.descDesde)}"></label>
     <label for="cvDP">Descuento (%)<input id="cvDP" type="number" step="1" min="0" max="90" value="${N(S.cfg.descPct)}"></label>
-  </div><p class="hint" style="margin:8px 0 0">Se aplica solo a las velas sueltas, no a los combos. En cada pedido lo puedes quitar si no corresponde.</p></div>`;
-  ["cvD","cvG","cvU","cvPS","cvPM","cvPL","cvDom","cvDD","cvDP"].forEach(id => $("#"+id).onchange = async () => {
+  </div><p class="hint" style="margin:8px 0 0">Se aplica solo a las velas sueltas, no a los combos. En cada pedido lo puedes quitar si no corresponde.</p>
+  <h3 style="margin:16px 0 8px">Kits (combos)</h3>
+  <div class="grid">
+    <label for="cvKT">Tarjeta por kit ($)<input id="cvKT" type="number" step="100" min="0" value="${N(S.cfg.kitTarjeta)}"></label>
+    <label for="cvKC">Caja por kit ($)<input id="cvKC" type="number" step="100" min="0" value="${N(S.cfg.kitCaja)}"></label>
+    <label for="cvKE">Energía por kit ($)<input id="cvKE" type="number" step="100" min="0" value="${N(S.cfg.kitEnergia)}"></label>
+    <label for="cvKM">Mano de obra por kit ($)<input id="cvKM" type="number" step="500" min="0" value="${N(S.cfg.kitMO)}"></label>
+    <label for="cvKG">Ganancia empresa (%)<input id="cvKG" type="number" step="1" min="0" value="${N(S.cfg.kitGanancia)}"></label>
+  </div><p class="hint" style="margin:8px 0 0">Son valores por kit completo, no por vela. La ganancia se calcula sobre el costo total del kit (insumos + caja + tarjeta + energía + mano de obra).</p></div>`;
+  ["cvD","cvG","cvU","cvPS","cvPM","cvPL","cvDom","cvDD","cvDP","cvKT","cvKC","cvKE","cvKM","cvKG"].forEach(id => $("#"+id).onchange = async () => {
     await saveDoc("config","ajustes",{...S.cfg, densEsencia:N($("#cvD").value)||0.95, gotasMl:Math.round(N($("#cvG").value))||20, usosMolde:Math.round(N($("#cvU").value))||50,
-      pabPrecioS:N($("#cvPS").value), pabPrecioM:N($("#cvPM").value), pabPrecioL:N($("#cvPL").value), domicilioCosto:N($("#cvDom").value), descDesde:Math.round(N($("#cvDD").value)), descPct:N($("#cvDP").value)}, true);
+      pabPrecioS:N($("#cvPS").value), pabPrecioM:N($("#cvPM").value), pabPrecioL:N($("#cvPL").value), domicilioCosto:N($("#cvDom").value), descDesde:Math.round(N($("#cvDD").value)), descPct:N($("#cvDP").value),
+      kitTarjeta:N($("#cvKT").value), kitCaja:N($("#cvKC").value), kitEnergia:N($("#cvKE").value), kitMO:N($("#cvKM").value), kitGanancia:N($("#cvKG").value)}, true);
     render(); toast("Conversión actualizada");
   });
   const calcSel = $("#qnF"), calcCant = $("#qnC");
@@ -778,7 +800,7 @@ function editFicha(f0){
     {nombre:"Colorante", tipo:"colorante", compraCant:10, compraPrecio:0, uso:0, unidad:"gotas"},
     {nombre:"Pabilo", tipo:"pabilo", talla:"M", compraCant:100, compraPrecio:0, uso:0, unidad:"cm"},
     {nombre:"Pegatina", compraCant:1, compraPrecio:0, uso:1, unidad:"und"},
-    {nombre:"Bolsa", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}], manoObra:0, gananciaPct:30, precioFijo:0 }));
+    {nombre:"Caja", compraCant:1, compraPrecio:0, uso:1, unidad:"und"}], manoObra:0, gananciaPct:30, precioFijo:0 }));
   f.insumos.forEach(i => {
     const t = insTipo(i); i.tipo = t;
     if(t === "esencia"){ if(!ENVASES_ESENCIA.includes(N(i.compraCant))) i.compraCant = 120; i.unidad = "g"; }
@@ -863,12 +885,11 @@ function editFicha(f0){
 function editCombo(c0){
   const isNew = !c0;
   if(!S.fichas.length){ toast("Primero crea fichas de costeo"); return; }
-  const cb = JSON.parse(JSON.stringify(c0 || { id:uid(), nombre:"", items:[{ fichaId:S.fichas[0].id, cant:2 }], precio:0 }));
+  const cb = JSON.parse(JSON.stringify(c0 || { id:uid(), nombre:"", items:[{ fichaId:S.fichas[0].id, cant:2 }], precioFijo:0 }));
   drawer(isNew ? "Nuevo combo" : "Combo", `
     <label for="cbN">Nombre del combo<input id="cbN" value="${esc(cb.nombre)}" placeholder="Ej. Combo Navidad x3"></label>
     <div><h3>Velas del combo</h3><div class="lines" id="cbI"></div><button class="btn small" id="cbA" style="margin-top:8px">+ Agregar vela</button></div>
-    <label for="cbP">Precio del combo<input id="cbP" type="number" min="0" step="500" value="${N(cb.precio)||""}" placeholder="Precio normal"></label>
-    <div class="grid" id="cbQ"></div>
+    <label for="cbP">Precio fijo (opcional)<input id="cbP" type="number" min="0" step="500" value="${N(cb.precioFijo)||""}" placeholder="Usar el sugerido"></label>
     <div class="panel" id="cbS"></div>
     <div class="row" style="justify-content:space-between"><button class="btn danger" id="cbD" ${isNew?"hidden":""}>Borrar</button><button class="btn primary" id="cbG">Guardar combo</button></div>`,
   (d, close) => {
@@ -882,21 +903,19 @@ function editCombo(c0){
       sum();
     };
     const sum = () => {
-      cb.precio = N($("#cbP",d).value);
+      cb.precioFijo = N($("#cbP",d).value);
       const c = comboCalc(cb);
-      const r500 = v => Math.ceil(v/500)*500;
-      const opciones = [0.05, 0.10, 0.15].map(p => r500(c.normal*(1-p)));
-      const qh = c.normal ? opciones.map((v,i)=>`<button class="btn small" data-pq="${v}">${[5,10,15][i]}% menos · ${$$(v)}</button>`).join("") : "";
-      if($("#cbQ",d).dataset.h !== qh){ $("#cbQ",d).dataset.h = qh; $("#cbQ",d).innerHTML = qh; $("#cbQ",d).querySelectorAll("[data-pq]").forEach(b => b.onclick = () => { $("#cbP",d).value = b.dataset.pq; sum(); }); }
-      const cls = c.ganancia < 0 ? "var(--bad)" : c.conserva < .6 ? "var(--warn)" : "var(--ok)";
-      $("#cbS",d).innerHTML = `<dl class="kv"><dt>${c.velas} velas a precio normal</dt><dd class="num">${$$(c.normal)}</dd>
-      <dt class="total">Precio del combo</dt><dd class="total num">${$$(c.precio)}</dd>
-      <dt>Descuento para el cliente</dt><dd class="num">${$$(c.normal - c.precio)} (${Math.round(c.descuento*100)}%)</dd>
-      <dt>Insumos y molde</dt><dd class="num">${$$(c.insumos)}</dd><dt>Tu mano de obra</dt><dd class="num">${$$(c.mo)}</dd>
-      <dt class="total">Ganancia empresa</dt><dd class="total num" style="color:${cls}">${$$(c.ganancia)}</dd>
-      <dt>Ganancia si las vendieras sueltas</dt><dd class="num">${$$(c.gananciaNormal)}</dd>
-      <dt>Precio mínimo sin perder</dt><dd class="num">${$$(c.minimo)}</dd></dl>
-      <p class="hint" style="margin:10px 0 0;color:${cls}">${c.ganancia < 0 ? "Con este precio pierdes plata: no alcanza para insumos y mano de obra." : c.gananciaNormal > 0 ? `Conservas el ${Math.round(c.conserva*100)}% de la ganancia que tendrías vendiéndolas sueltas.${c.conserva < .6 ? " Es un descuento fuerte; úsalo como oferta puntual." : ""}` : ""}</p>`;
+      const cls = c.ganancia < 0 ? "var(--bad)" : "var(--ok)";
+      $("#cbS",d).innerHTML = `<dl class="kv"><dt>Insumos de ${c.velas} velas (sin empaque individual)</dt><dd class="num">${$$(c.velasInsumos)}</dd>
+      <dt>Caja</dt><dd class="num">${$$(c.fx.caja)}</dd><dt>Tarjeta</dt><dd class="num">${$$(c.fx.tarjeta)}</dd><dt>Energía</dt><dd class="num">${$$(c.fx.energia)}</dd>
+      <dt>Tu mano de obra (todo el kit)</dt><dd class="num">${$$(c.mo)}</dd>
+      <dt>Costo total del kit</dt><dd class="num">${$$(c.base)}</dd>
+      <dt>Precio sugerido (+${c.gananciaPct}%, redondeado a $500)</dt><dd class="num">${$$(c.sugerido)}</dd>
+      <dt class="total">Precio del kit</dt><dd class="total num">${$$(c.precio)}</dd>
+      <dt class="total">Ganancia empresa</dt><dd class="total num" style="color:${cls}">${$$(c.ganancia)}${c.precio>0?` (${Math.round(c.ganancia/c.precio*100)}% del precio)`:""}</dd>
+      <dt>Las mismas velas sueltas</dt><dd class="num">${$$(c.normal)}</dd>
+      <dt>Ahorro para el cliente</dt><dd class="num">${$$(Math.max(0, c.normal - c.precio))}${c.normal>0?` (${Math.round(Math.max(0,c.descuento)*100)}%)`:""}</dd></dl>
+      ${c.ganancia < 0 ? `<p class="hint" style="margin:10px 0 0;color:var(--bad)">Con ese precio fijo pierdes plata: no alcanza para el costo del kit (${$$(c.minimo)}).</p>` : ""}`;
     };
     $("#cbP",d).oninput = sum;
     $("#cbA",d).onclick = () => { cb.items.push({ fichaId:S.fichas[0].id, cant:1 }); draw(); };
@@ -905,8 +924,8 @@ function editCombo(c0){
       if(!cb.nombre){ $("#cbN",d).focus(); toast("Ponle nombre al combo"); return; }
       cb.items = cb.items.filter(i=>N(i.cant)>0);
       if(!cb.items.length){ toast("Agrega al menos una vela"); return; }
-      cb.precio = N($("#cbP",d).value) || comboCalc(cb).normal;
-      const { id, ...body } = cb;
+      cb.precioFijo = N($("#cbP",d).value);
+      const { id, precio, ...body } = cb;
       if(await saveDoc("combos", id, body)){ close(); toast("Combo guardado"); }
     };
     $("#cbD",d).onclick = e => confirmDelete(e.target, async () => { if(await delDoc("combos", cb.id)){ close(); toast("Combo borrado"); } });
